@@ -5,39 +5,18 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import normflows as nf
 
-torch.manual_seed(123)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def make_regression_data(n=200, p=100, sigma2=0.5, beta_signal=None, device="cpu"):
-    if beta_signal is None:
-        beta_signal = [1.5, -0.8, 0.7, -1.2, 0.5]
-
-    beta_signal = torch.as_tensor(beta_signal, dtype=torch.float32, device=device)
-    k = len(beta_signal)
-
-    if k > p:
-        raise ValueError("len(beta_signal) cannot exceed p")
-
-    X = torch.randn(n, p, device=device)
-    beta_true = torch.zeros(p, device=device)
-    beta_true[:k] = beta_signal
-
-    eps = math.sqrt(sigma2) * torch.randn(n, device=device)
-    y = X @ beta_true + eps
-
-    return X, y, beta_true
+def _to_cpu(x):
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu()
+    return x
 
 
-def summarize_beta_samples(beta_samples):
+def _safe_div(a, b, default=0.0):
+    return a / b if b != 0 else default
+
     
-    beta_mean_hat = beta_samples.mean(dim=0)
-
-    beta_centered = beta_samples - beta_mean_hat
-
-    beta_cov_hat = beta_centered.T @ beta_centered / (beta_samples.shape[0] - 1)
-
-    return beta_mean_hat, beta_cov_hat
-
 class RelaxedSpikeSlabTarget(nn.Module):
     def __init__(self, X, y,  sigma2, lambda_s=1.0,
         mu_t=0.0, sigma_t=1.0, tau=0.5, slab="laplace",  slab_scale=1.0, ):
@@ -289,119 +268,3 @@ def train_flow(model, target_dist, epochs=6000, num_samples=1024,
     return losses, tau_hist
 
 
-@torch.no_grad()
-def posterior_summary(model, target_dist, n_samples=5000,
-    gate_threshold=0.5, inclusion_threshold=0.5,):
-    
-    z, _ = model.sample(num_samples=n_samples)
-
-    beta_soft = target_dist.beta_from_latent(z)      # shape [m, p]
-    gate_soft = target_dist.gate_from_latent(z)      # shape [m, p]
-
-    gate_hard = (gate_soft > gate_threshold).float()  # shape [m, p]
-    beta_hard = target_dist.hard_beta_from_latent(
-        z,
-        threshold=gate_threshold
-    )
-
-    s, u, t = target_dist.split_latent(z)
-
-    beta_soft_mean = beta_soft.mean(dim=0)
-    beta_hard_mean = beta_hard.mean(dim=0)
-    gate_soft_mean = gate_soft.mean(dim=0)
-
-    posterior_inclusion_prob = gate_hard.mean(dim=0)
-
-    selected = (posterior_inclusion_prob > inclusion_threshold)
-    selected_idx = torch.nonzero(selected, as_tuple=False).squeeze(1)
-
-    out = {
-        # raw latent posterior samples
-        "z": z,
-        "s": s,
-        "u": u,
-        "t": t.squeeze(-1),
-
-        # soft/hard posterior quantities
-        "beta_soft": beta_soft,
-        "beta_hard": beta_hard,
-        "gate_soft": gate_soft,
-        "gate_hard": gate_hard,
-
-        # posterior means
-        "beta_soft_mean": beta_soft_mean,
-        "beta_hard_mean": beta_hard_mean,
-        "gate_soft_mean": gate_soft_mean,
-
-        # variable-selection summaries
-        "pip": posterior_inclusion_prob,
-        "selected": selected,
-        "selected_idx": selected_idx,
-    }
-    return out
-
-def evaluate_against_truth(beta_true, post_summary):
-
-    beta_true = beta_true.detach().cpu()
-    selected = post_summary["selected"].detach().cpu()
-    posterior_inclusion_prob = post_summary["pip"].detach().cpu()
-    beta_soft_mean = post_summary["beta_soft_mean"].detach().cpu()
-    beta_hard_mean = post_summary["beta_hard_mean"].detach().cpu()
-
-    true_support = beta_true.ne(0)
-    est_support = selected.bool()
-
-    tp = (true_support & est_support).sum().item()
-    fp = ((~true_support) & est_support).sum().item()
-    fn = (true_support & (~est_support)).sum().item()
-
-    precision = tp / max(tp + fp, 1)
-    recall = tp / max(tp + fn, 1)
-
-    print("\n===== Variable selection summary =====")
-    print("selected indices:", post_summary["selected_idx"].detach().cpu().tolist())
-    print("TP:", tp, "FP:", fp, "FN:", fn)
-    print("precision:", precision)
-    print("recall   :", recall)
-
-    print("\nfirst 20 posterior inclusion probabilities:")
-    print(posterior_inclusion_prob[:20])
-
-    print("\nfirst 20 beta soft posterior means:")
-    print(beta_soft_mean[:20])
-
-    print("\nfirst 20 beta hard posterior means:")
-    print(beta_hard_mean[:20])
-
-    print("\nfirst 20 true beta:")
-    print(beta_true[:20])
-
-
-def plot_training(losses, tau_hist):
-    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-
-    ax[0].plot(losses)
-    ax[0].set_title("Loss history")
-    ax[0].set_xlabel("epoch")
-    ax[0].set_ylabel("reverse KL estimate")
-
-    ax[1].plot(tau_hist)
-    ax[1].set_title("Temperature annealing")
-    ax[1].set_xlabel("epoch")
-    ax[1].set_ylabel("tau")
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_posterior_inclusion_prob(posterior_inclusion_prob, top_k=30, decision_threshold=0.5):
-    pip_np = posterior_inclusion_prob.detach().cpu().numpy()
-    idx = np.arange(len(pip_np))
-
-    plt.figure(figsize=(10, 4))
-    plt.bar(idx[:top_k], pip_np[:top_k])
-    plt.axhline(decision_threshold, linestyle="--")
-    plt.title(f"Posterior inclusion probabilities (first {top_k})")
-    plt.xlabel("j")
-    plt.ylabel("P(selected | data)")
-    plt.show()
