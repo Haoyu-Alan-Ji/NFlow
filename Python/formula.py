@@ -12,7 +12,12 @@ def _to_cpu(x):
         return x.detach().cpu()
     return x
 
+def to_tensor(x, dtype=torch.float32):
+    if isinstance(x, torch.Tensor):
+        return x.to(dtype)
+    return torch.tensor(x, dtype=dtype)
 
+    
 def _safe_div(a, b, default=0.0):
     return a / b if b != 0 else default
 
