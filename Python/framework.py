@@ -1,184 +1,25 @@
-from __future__ import annotations
-
-import copy
-import json
-import math
 import os
+import json
 import time
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import math
+import copy
 
-import matplotlib.pyplot as plt
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional, Tuple, Sequence
+
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import torch
+import torch.nn as nn
+import normflows as nf
 
-
-# ==========================================================
-# Configuration dataclasses
-# ==========================================================
-
-
-@dataclass
-class StagewiseAnnealConfig:
-    tau_start: float = 1.0
-    tau_end: float = 0.40
-    warmup_epochs: int = 200
-    n_anneal_stages: int = 5
-    min_stage_epochs: int = 80
-    max_stage_epochs: int = 220
-    base_lr: float = 5e-5
-    stage_lr_decay: float = 0.70
-    min_lr_scale: float = 0.20
-    num_samples: int = 128
-    grad_clip: Optional[float] = 3.0
-    elbo_beta: float = 1.0
-    optimizer_cls: Any = torch.optim.Adam
-    weight_decay: float = 0.0
-    beta1: float = 0.9
-    beta2: float = 0.999
-    eps: float = 1e-8
-    eval_every: int = 25
-    checkpoint_every: int = 25
-    print_every: int = 25
-    ema_beta: float = 0.90
-    diag_R_train: int = 256
-    diag_R_final: int = 4000
-    support_threshold: float = 0.50
-    instability_window: int = 2
-    plateau_window: int = 2
-    plateau_loss_rel: float = 1e-3
-    plateau_pred_rel: float = 2e-3
-    plateau_grad_slope: float = 0.05
-    plateau_churn: float = 0.10
-    plateau_abs_dS: int = 1
-    alert_grad_slope: float = 0.25
-    alert_support_jump_abs: int = 2
-    alert_support_jump_rel: float = 0.15
-    alert_loss_rel: float = 5e-4
-    alert_pred_rel: float = 0.0
-    alert_churn: float = 0.25
-    retry_shrink_power: float = 0.5
-    max_retries_per_drop: int = 2
-    history_round_digits: int = 8
-
-
-@dataclass
-class SplitConfig:
-    train_frac: float = 0.60
-    val_frac: float = 0.20
-    test_frac: float = 0.20
-    seed: int = 123
-
-
-@dataclass
-class SaveConfig:
-    output_dir: Optional[str] = None
-    save_plots: bool = True
-    save_history_csv: bool = True
-    save_checkpoint_manifest: bool = True
-    save_final_json: bool = True
-    save_predictions_csv: bool = True
-    save_support_sets_json: bool = True
-
-
-# ==========================================================
-# Utility functions
-# ==========================================================
-
-
-def to_numpy(x):
-    if torch.is_tensor(x):
-        return x.detach().cpu().numpy()
-    return np.asarray(x)
-
-
-def safe_float(x):
-    if x is None:
-        return float("nan")
-    if torch.is_tensor(x):
-        return x.item()
-    return float(x)
-
-
-class EMA:
-    def __init__(self, beta=0.9):
-        self.beta = beta
-        self.value = None
-
-    def update(self, x):
-        if self.value is None:
-            self.value = x
-        else:
-            self.value = self.beta * self.value + (1 - self.beta) * x
-        return self.value
-
-
-def jaccard_distance(a, b):
-    a, b = set(a), set(b)
-    if len(a | b) == 0:
-        return 0.0
-    return 1 - len(a & b) / len(a | b)
-
-
-def jaccard_similarity(a, b):
-    return 1 - jaccard_distance(a, b)
-
-
-def rolling_stage_taus(tau_start, tau_end, n_stages):
-    ratio = (tau_end / tau_start) ** (1 / n_stages)
-    return [tau_start * ratio**k for k in range(n_stages + 1)]
-
-
-def set_optimizer_lr(optimizer, lr):
-    for g in optimizer.param_groups:
-        g["lr"] = lr
-
-def make_optimizer(model, lr):
-    return torch.optim.Adam(model.parameters(), lr=lr)
-
-def save_model_state(model):
-    return {k: v.cpu().clone() for k, v in model.state_dict().items()}
-
-def load_model_state(model, state):
-    model.load_state_dict(state)
-
-def ensure_dir(path):
-    if path is not None:
-        os.makedirs(path, exist_ok=True)
-    return path
-
-def split_data_tensors(X, y, split_cfg):
-    n = X.shape[0]
-    g = torch.Generator(device=X.device)
-    g.manual_seed(split_cfg.seed)
-    perm = torch.randperm(n, generator=g, device=X.device)
-
-    n_train = int(round(n * split_cfg.train_frac))
-    n_val = int(round(n * split_cfg.val_frac))
-    n_train = min(max(n_train, 1), n - 2)
-    n_val = min(max(n_val, 1), n - n_train - 1)
-    n_test = n - n_train - n_val
-    if n_test <= 0:
-        n_test = 1
-        n_val = max(1, n_val - 1)
-
-    idx_train = perm[:n_train]
-    idx_val = perm[n_train:n_train + n_val]
-    idx_test = perm[n_train + n_val:]
-
-    return {
-        "X_train": X[idx_train],
-        "y_train": y[idx_train],
-        "X_val": X[idx_val],
-        "y_val": y[idx_val],
-        "X_test": X[idx_test],
-        "y_test": y[idx_test],
-        "idx_train": idx_train.detach().cpu(),
-        "idx_val": idx_val.detach().cpu(),
-        "idx_test": idx_test.detach().cpu(),
-    }
-
+from .utils import EMA, jaccard_distance, rolling_stage_taus, make_optimizer, save_model_state, load_model_state, ensure_dir, split_data_tensors, set_optimizer_lr
+from .diagplot import plot_training_overview, plot_support_vs_predictive, plot_boundary_density, plot_uncertainty_vs_abs_boundary, plot_support_overlap_heatmap
+from .config import StagewiseAnnealConfig, SplitConfig, SaveConfig
+from .model import SemanticAffineCoupling, FlowMap, Relaxedsas, NBase, FlowVI, build_flow_vi
+from .simfun import simfun1
 
 # ==========================================================
 # Posterior sampling and hard-support diagnostics
@@ -186,35 +27,69 @@ def split_data_tensors(X, y, split_cfg):
 
 def sample_posterior_latents(model, R=2000):
     model.eval()
-    z0 = model.q0.rsample(R)
-    eps, _ = model.posterior_flow(z0, return_logdet=True)
+
+    sample = model.q0.rsample(R)
+    if isinstance(sample, tuple):
+        _, z0 = sample
+    else:
+        z0 = sample
+
+    flow_out = model.posterior_flow(z0, return_logdet=True)
+    if isinstance(flow_out, tuple):
+        eps = flow_out[0]
+    else:
+        eps = flow_out
+
     dec = model.generative_model.decode(eps)
     return {k: dec[k].detach().cpu() for k in ["s", "u", "t", "beta"]}
 
 
 def hard_support_from_draws(draws, support_threshold=0.5):
-    s, u, t = draws["s"], draws["u"], draws["t"]
+    s = draws["s"]
+    u = draws["u"]
+    t = draws["t"]
+
     if t.ndim == 1:
-        t = t[:, None]
+        t = t.unsqueeze(1)
 
     ind = (u > t).float()
-    support_mask = ind.mean(dim=0) > support_threshold
-    support_idx = torch.where(support_mask)[0].tolist()
+    vote_rate = ind.mean(dim=0)
+    support_mask = vote_rate > support_threshold
+    support_idx = torch.where(support_mask)[0].cpu().numpy().astype(int).tolist()
+
     beta_hard_samples = s * ind
+    beta_hard_mean = beta_hard_samples.mean(dim=0)
+    boundary = (u - t).float()
 
     return {
         "support_idx": support_idx,
+        "support_mask": support_mask.cpu(),
         "support_size": len(support_idx),
-        "beta_hard_samples": beta_hard_samples,
+        "beta_hard_samples": beta_hard_samples.cpu(),
+        "beta_hard_mean": beta_hard_mean.cpu(),
+        "boundary": boundary.cpu(),
     }
 
 
-def posterior_predictions_from_hard_samples(X, beta_hard_samples):
-    return X.float().cpu() @ beta_hard_samples.float().cpu().T
+def posterior_predictions_from_hard_samples(X, beta_hard_samples, family="gaussian"):
+    eta = X.float().cpu() @ beta_hard_samples.float().cpu().T
+
+    if family == "gaussian":
+        return eta
+    elif family == "poisson":
+        return torch.exp(eta)
+    else:
+        raise ValueError(f"Unknown family: {family}")
 
 
-def predictive_metrics(X, y, beta_hard_samples, sigma2=None):
-    pred_draws = posterior_predictions_from_hard_samples(X, beta_hard_samples)
+def predictive_metrics(X, y, beta_hard_samples, sigma2=None, family="gaussian"):
+    eta = X.float().cpu() @ beta_hard_samples.float().cpu().T
+
+    if family == "gaussian":
+        pred_draws = eta
+    elif family == "poisson":
+        pred_draws = torch.exp(eta)
+
     yhat = pred_draws.mean(dim=1)
     y = y.cpu().float().view(-1)
 
@@ -229,10 +104,43 @@ def predictive_metrics(X, y, beta_hard_samples, sigma2=None):
 
     out = {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2}
 
-    if sigma2 is not None:
-        ll = -0.5 * (((y[:, None] - pred_draws)**2) / sigma2 + math.log(2 * math.pi * sigma2))
-        out["heldout_loglik"] = torch.logsumexp(ll, dim=1).sub(math.log(pred_draws.shape[1])).mean().item()
+    if family == "gaussian":
+        if sigma2 is not None:
+            ll = -0.5 * (
+                ((y[:, None] - pred_draws) ** 2) / sigma2
+                + math.log(2 * math.pi * sigma2)
+            )
+            out["heldout_loglik"] = (
+                torch.logsumexp(ll, dim=1)
+                .sub(math.log(pred_draws.shape[1]))
+                .mean()
+                .item()
+            )
+            out["nll"] = -out["heldout_loglik"]
+
+    elif family == "poisson":
+        mu = pred_draws.clamp_min(1e-8)
+        ll = y[:, None] * torch.log(mu) - mu - torch.lgamma(y[:, None] + 1.0)
+
+        out["heldout_loglik"] = (
+            torch.logsumexp(ll, dim=1)
+            .sub(math.log(mu.shape[1]))
+            .mean()
+            .item()
+        )
         out["nll"] = -out["heldout_loglik"]
+
+        y_safe = y.clamp_min(1e-8)
+        yhat_safe = yhat.clamp_min(1e-8)
+        dev = 2.0 * torch.where(
+            y > 0,
+            y * torch.log(y_safe / yhat_safe) - (y - yhat_safe),
+            -(y - yhat_safe),
+        )
+        out["poisson_deviance"] = dev.mean().item()
+
+    else:
+        raise ValueError(f"Unknown family: {family}")
 
     return out
 
@@ -258,14 +166,27 @@ def selection_metrics_from_support(support_idx, beta_true, eps=1e-12):
 # ==========================================================
 
 
-def evaluate_checkpoint(model, X_val, y_val, sigma2, R, support_threshold, prev_record, loss_ema, log_grad_ema,):
+def evaluate_checkpoint(
+    model,
+    X_val,
+    y_val,
+    sigma2,
+    family,
+    R,
+    support_threshold,
+    prev_record,
+    loss_value,
+    loss_ema,
+    log_grad_ema,
+):
     draws = sample_posterior_latents(model, R=R)
     hard = hard_support_from_draws(draws, support_threshold=support_threshold)
-    pred = predictive_metrics(X_val, y_val, hard["beta_hard_samples"], sigma2=sigma2)
+    pred = predictive_metrics(X_val, y_val, hard["beta_hard_samples"], sigma2=sigma2, family=family)
 
     rec = {
         "support_idx": hard["support_idx"],
         "support_size": hard["support_size"],
+        "loss": float(loss_value) if loss_value is not None else float("nan"),
         "loss_ema": float(loss_ema) if loss_ema is not None else float("nan"),
         "log_grad_ema": float(log_grad_ema) if log_grad_ema is not None else float("nan"),
         **{f"val_{k}": v for k, v in pred.items()},
@@ -280,16 +201,21 @@ def evaluate_checkpoint(model, X_val, y_val, sigma2, R, support_threshold, prev_
     else:
         rec["dS"] = int(rec["support_size"] - prev_record["support_size"])
         rec["churn"] = float(jaccard_distance(rec["support_idx"], prev_record["support_idx"]))
+
         prev_mse = max(float(prev_record.get("val_mse", float("nan"))), 1e-12)
         cur_mse = float(rec.get("val_mse", float("nan")))
         rec["pred_improve_rel"] = float(max(prev_mse - cur_mse, 0.0) / prev_mse)
-        prev_loss_ema = float(prev_record.get("loss_ema", float("nan")))
-        cur_loss_ema = float(rec.get("loss_ema", float("nan")))
-        denom = max(abs(prev_loss_ema), 1e-12)
-        rec["loss_improve_rel"] = float(max(prev_loss_ema - cur_loss_ema, 0.0) / denom)
-        rec["grad_slope"] = float(rec.get("log_grad_ema", float("nan")) - prev_record.get("log_grad_ema", float("nan")))
-    return rec
 
+        prev_loss = float(prev_record.get("loss", float("nan")))
+        cur_loss = float(rec.get("loss", float("nan")))
+        denom = max(abs(prev_loss), 1e-12)
+        rec["loss_improve_rel"] = float(max(prev_loss - cur_loss, 0.0) / denom)
+
+        rec["grad_slope"] = float(
+            rec.get("log_grad_ema", float("nan")) - prev_record.get("log_grad_ema", float("nan"))
+        )
+
+    return rec
 
 def is_alert_record(rec, cfg):
     dS = rec["dS"]
@@ -327,40 +253,68 @@ def best_record_key(rec):
     return (rec["val_mse"], rec["support_size"])
 
 
-def select_checkpoint_from_history(history_df, pred_eps_rel, loss_eps_rel, grad_quantile, ds_quantile, churn_quantile,):
+def select_checkpoint_from_history(
+    history_df: pd.DataFrame,
+    loss_eps_rel: float = 0.01,
+    grad_quantile: float = 0.80,
+    ds_quantile: float = 0.80,
+    churn_quantile: float = 0.80,
+    exclude_warmup: bool = True,
+    relaxed_loss_mult: float = 2.0,
+    relaxed_stability_mult: float = 1.5,
+) -> int:
     if history_df.empty:
         raise ValueError("history_df is empty")
 
     df = history_df.copy().reset_index(drop=True)
-    best_pred = float(df["val_mse"].min())
-    best_loss = float(df["loss_ema"].min())
 
-    positive_dS = df["dS"].clip(lower=0)
-    grad_thr = float(df["grad_slope"].quantile(grad_quantile))
-    ds_thr = float(positive_dS.quantile(ds_quantile))
+    if exclude_warmup and "is_warmup" in df.columns:
+        df_nonwarm = df[~df["is_warmup"]].copy()
+        if not df_nonwarm.empty:
+            df = df_nonwarm
+
+    df["dS_abs"] = df["dS"].abs()
+    df["dlogg_abs"] = df["grad_slope"].abs()
+
+    grad_thr = float(df["dlogg_abs"].quantile(grad_quantile))
+    ds_thr = float(df["dS_abs"].quantile(ds_quantile))
     churn_thr = float(df["churn"].quantile(churn_quantile))
 
-    cand = df[
-        (df["val_mse"] <= best_pred * (1.0 + pred_eps_rel))
-        & (df["loss_ema"] <= best_loss * (1.0 + loss_eps_rel))
-        & (df["grad_slope"] <= grad_thr)
-        & (positive_dS <= ds_thr)
-        & (df["churn"] <= churn_thr)
-    ]
+    stable = df[
+        (df["churn"] <= churn_thr)
+        & (df["dS_abs"] <= ds_thr)
+        & (df["dlogg_abs"] <= grad_thr)
+    ].copy()
+
+    if stable.empty:
+        stable = df[
+            (df["churn"] <= relaxed_stability_mult * churn_thr)
+            & (df["dS_abs"] <= relaxed_stability_mult * ds_thr)
+            & (df["dlogg_abs"] <= relaxed_stability_mult * grad_thr)
+        ].copy()
+
+    if stable.empty:
+        stable = df.copy()
+
+    best_loss = float(stable["loss"].min())
+
+    cand = stable[
+        stable["loss"] <= best_loss * (1.0 + loss_eps_rel)
+    ].copy()
 
     if cand.empty:
-        cand = df[
-            (df["val_mse"] <= best_pred * (1.0 + 2.0 * pred_eps_rel))
-            & (df["loss_ema"] <= best_loss * (1.0 + 2.0 * loss_eps_rel))
-        ]
+        cand = stable[
+            stable["loss"] <= best_loss * (1.0 + relaxed_loss_mult * loss_eps_rel)
+        ].copy()
 
     if cand.empty:
-        cand = df
+        raise ValueError("No checkpoint found even in the relaxed stable/loss region.")
 
     cand = cand.sort_values(
-        by=["support_size", "val_mse", "loss_ema", "churn", "grad_slope", "epoch"],
+        by=["churn", "dS_abs", "dlogg_abs", "loss", "support_size", "epoch"],
         ascending=[True, True, True, True, True, True],
     )
+
     return int(cand.iloc[0]["ckpt_id"])
 
 
@@ -369,7 +323,7 @@ def select_checkpoint_from_history(history_df, pred_eps_rel, loss_eps_rel, grad_
 # ==========================================================
 
 
-def train_flow_stagewise(model, X_val, y_val, sigma2, cfg, device,):
+def train_flow_stagewise(model, X_val, y_val, sigma2, family, cfg, device,):
     if device is None:
         device = next(model.parameters()).device
 
@@ -440,16 +394,18 @@ def train_flow_stagewise(model, X_val, y_val, sigma2, cfg, device,):
 
             if needs_eval:
                 rec = evaluate_checkpoint(
-                    model=model,
-                    X_val=X_val,
-                    y_val=y_val,
-                    sigma2=sigma2,
-                    R=cfg.diag_R_train,
-                    support_threshold=cfg.support_threshold,
-                    prev_record=prev_record,
-                    loss_ema=loss_ema_val,
-                    log_grad_ema=log_grad_ema_val,
-                )
+                        model=model,
+                        X_val=X_val,
+                        y_val=y_val,
+                        sigma2=sigma2,
+                        family=family,
+                        R=cfg.diag_R_train,
+                        support_threshold=cfg.support_threshold,
+                        prev_record=prev_record,
+                        loss_value=loss_val,
+                        loss_ema=loss_ema_val,
+                        log_grad_ema=log_grad_ema_val,
+                    )
                 rec.update({
                     "ckpt_id": ckpt_id,
                     "stage": stage_index,
@@ -488,9 +444,9 @@ def train_flow_stagewise(model, X_val, y_val, sigma2, cfg, device,):
                     print(
                         f"[stage {stage_index:02d} | epoch {global_epoch:04d}] "
                         f"tau={tau_now:.4f} lr={stage_lr:.2e} "
-                        f"loss_ema={loss_ema_val:.6f} val_mse={rec['val_mse']:.6f} "
+                        f"loss={loss_val:.6f} "
                         f"logg={log_grad_ema_val:.4f} dlogg={rec['grad_slope']:+.4f} "
-                        f"S={rec['support_size']:3d} dS={rec['dS']:+3d} churn={rec['churn']:.3f} {flag}{star}"
+                        f"S={rec['support_size']:3d} churn={rec['churn']:.3f} {flag}{star}"
                     )
 
                 if rec["alert"] and not is_warmup:
@@ -570,139 +526,131 @@ def train_flow_stagewise(model, X_val, y_val, sigma2, cfg, device,):
 
 
 # ==========================================================
-# Final evaluation, tables, plots, saving
+# Main experiment wrapper compatible with the user's API
 # ==========================================================
 
 
-def build_variable_table(beta_hard_mean, selected_support, beta_true=None):
-    beta_est = beta_hard_mean.cpu().numpy()
-    p = len(beta_est)
-    selected = np.zeros(p, dtype=int)
-    selected[list(selected_support)] = 1
+def finalize_selected_checkpoint(
+    model: torch.nn.Module,
+    selected_ckpt_id: int,
+    checkpoints: Dict[int, Dict[str, Any]],
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    X_val: torch.Tensor,
+    y_val: torch.Tensor,
+    X_test: torch.Tensor,
+    y_test: torch.Tensor,
+    sigma2: Optional[float],
+    beta_true: Optional[torch.Tensor],
+    history_df: pd.DataFrame,
+    cfg: StagewiseAnnealConfig,
+    device: Optional[torch.device] = None,
+    family = "gaussian",
+) -> Dict[str, Any]:
+    if device is None:
+        device = next(model.parameters()).device
 
-    df = pd.DataFrame({
+    load_model_state(model, checkpoints[selected_ckpt_id]["state"], device=device)
+    meta = checkpoints[selected_ckpt_id]["meta"]
+    model.generative_model.set_tau(float(meta["tau"]))
+
+    draws = sample_posterior_latents(model, R=cfg.diag_R_final)
+    hard = hard_support_from_draws(draws, support_threshold=cfg.support_threshold)
+
+    train_metrics = predictive_metrics(X_train, y_train, hard["beta_hard_samples"], sigma2=sigma2, family=family)
+    val_metrics = predictive_metrics(X_val, y_val, hard["beta_hard_samples"], sigma2=sigma2, family=family)
+    test_metrics = predictive_metrics(X_test, y_test, hard["beta_hard_samples"], sigma2=sigma2, family=family)
+
+    selection_metrics = selection_metrics_from_support(
+        hard["support_idx"],
+        beta_true=beta_true,
+    )
+
+    beta_est = hard["beta_hard_mean"].detach().cpu().numpy()
+    p = beta_est.shape[0]
+    var_table = pd.DataFrame({
         "j": np.arange(p),
         "beta_hard_mean": beta_est,
-        "selected": selected,
+        "selected": 0,
     })
+    var_table.loc[list(hard["support_idx"]), "selected"] = 1
 
     if beta_true is not None:
-        beta_true = beta_true.cpu().numpy()
-        df["beta_true"] = beta_true
-        df["truth"] = (np.abs(beta_true) > 1e-12).astype(int)
+        beta_true_np = beta_true.detach().cpu().numpy()
+        var_table["beta_true"] = beta_true_np
+        var_table["truth"] = (np.abs(beta_true_np) > 1e-12).astype(int)
 
-    return df
+    pred_table = pd.DataFrame([
+        {"split": "train", **train_metrics},
+        {"split": "val", **val_metrics},
+        {"split": "test", **test_metrics},
+    ])
 
+    freq = np.zeros(p, dtype=float)
+    if history_df is not None and not history_df.empty and "support_idx" in history_df.columns:
+        for support_idx in history_df["support_idx"]:
+            arr = np.zeros(p, dtype=float)
+            arr[list(support_idx)] = 1.0
+            freq += arr
+        freq /= len(history_df)
 
-def compute_selection_frequency(history_df, p, ckpt_ids=None):
-    if ckpt_ids is not None:
-        history_df = history_df[history_df["ckpt_id"].isin(ckpt_ids)]
-    freq = np.zeros(p)
-    if len(history_df) == 0:
-        return freq
-    for support_idx in history_df["support_idx"]:
-        freq[list(support_idx)] += 1
-    return freq / len(history_df)
+    unstable_idx = np.where((freq > 0.0) & (freq < 1.0))[0].astype(int).tolist()
+    never_selected_idx = np.where(freq == 0.0)[0].astype(int).tolist()
 
+    return {
+        "selected_support": hard["support_idx"],
+        "support_size": int(len(hard["support_idx"])),
+        "beta_hard_mean": hard["beta_hard_mean"],
+        "boundary": hard["boundary"],
+        "hard_freq": freq,
+        "unstable_idx": unstable_idx,
+        "never_selected_idx": never_selected_idx,
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "selection_metrics": selection_metrics,
+        "var_table": var_table,
+        "pred_table": pred_table,
+    }
 
-def plot_training_overview(history_df, savepath=None):
-    if len(history_df) == 0:
-        return
-    fig, axes = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
+def show_final_text_metrics(out, top_k=20):
+    train_block = out["train_out"] if "train_out" in out else out
+    sel_id = train_block["selected_ckpt_id"]
+    sel_meta = train_block["checkpoints"][sel_id]["meta"]
+    final = out["final"]
 
-    axes[0].plot(history_df["epoch"], history_df["loss_ema"])
-    axes[1].plot(history_df["epoch"], history_df["val_mse"])
-    axes[2].plot(history_df["epoch"], history_df["log_grad_ema"])
-    axes[3].step(history_df["epoch"], history_df["support_size"], where="post")
+    ckpt_df = pd.DataFrame([{
+        "ckpt_id": int(sel_id),
+        "epoch": int(sel_meta["epoch"]),
+        "stage": int(sel_meta["stage"]),
+        "tau": float(sel_meta["tau"]),
+        "support_size": int(sel_meta["support_size"]),
+        "loss": float(sel_meta["loss"]),
+        "runtime_sec": float(train_block["runtime_sec"]),
+    }])
 
-    axes[0].set_ylabel("loss")
-    axes[1].set_ylabel("val mse")
-    axes[2].set_ylabel("log grad")
-    axes[3].set_ylabel("support")
-    axes[3].set_xlabel("epoch")
+    print("===== Selected checkpoint =====")
+    print(ckpt_df.to_string(index=False))
 
-    fig.tight_layout()
-    if savepath:
-        fig.savefig(savepath)
-    plt.close(fig)
+    print("\n===== Selection metrics =====")
+    sel_df = pd.DataFrame([final["selection_metrics"]])
+    print(sel_df.to_string(index=False))
 
+    print("\n===== Selected support =====")
+    print(final["selected_support"])
 
-def plot_support_vs_predictive(history_df, savepath=None):
-    if len(history_df) == 0:
-        return
-    plt.figure(figsize=(6, 4))
-    plt.scatter(history_df["support_size"], history_df["val_mse"], c=history_df["tau"])
-    plt.xlabel("support size")
-    plt.ylabel("val mse")
-    plt.tight_layout()
-    if savepath:
-        plt.savefig(savepath)
-    plt.close()
+    print("\n===== Top variables by |beta_hard_mean| =====")
+    top_df = final["var_table"].copy()
+    top_df["abs_beta_hard_mean"] = top_df["beta_hard_mean"].abs()
+    view_cols = [c for c in ["j", "beta_hard_mean", "selected", "beta_true", "truth"] if c in top_df.columns]
+    print(
+        top_df.sort_values("abs_beta_hard_mean", ascending=False)
+              .head(top_k)[view_cols]
+              .to_string(index=False)
+    )
 
-
-def plot_boundary_density(boundary, final_support, never_selected_idx, savepath=None):
-    if boundary.numel() == 0:
-        return
-
-    plt.figure(figsize=(7, 4))
-    if len(final_support) > 0:
-        vals = boundary[:, final_support].reshape(-1).numpy()
-        plt.hist(vals, bins=50, density=True, alpha=0.5, label="selected")
-    if len(never_selected_idx) > 0:
-        vals = boundary[:, never_selected_idx].reshape(-1).numpy()
-        plt.hist(vals, bins=50, density=True, alpha=0.5, label="never")
-
-    plt.xlabel("d = u - t")
-    plt.ylabel("density")
-    plt.legend()
-    plt.tight_layout()
-    if savepath:
-        plt.savefig(savepath)
-    plt.close()
-
-
-def plot_uncertainty_vs_abs_boundary(boundary, hard_freq, savepath=None):
-    if boundary.numel() == 0:
-        return
-
-    x = boundary.mean(dim=0).abs().numpy()
-    y = 4 * hard_freq * (1 - hard_freq)
-
-    plt.figure(figsize=(6, 4))
-    plt.scatter(x, y, s=15)
-    plt.xlabel("|E[d]|")
-    plt.ylabel("instability")
-    plt.tight_layout()
-    if savepath:
-        plt.savefig(savepath)
-    plt.close()
-
-
-def plot_support_overlap_heatmap(history_df, max_ckpts=20, savepath=None):
-    if len(history_df) == 0:
-        return
-
-    df = history_df.sort_values("epoch").copy()
-    if len(df) > max_ckpts:
-        idx = np.linspace(0, len(df) - 1, max_ckpts).round().astype(int)
-        df = df.iloc[idx]
-
-    supports = df["support_idx"].tolist()
-    n = len(supports)
-    mat = np.zeros((n, n))
-
-    for i in range(n):
-        for j in range(n):
-            mat[i, j] = jaccard_similarity(supports[i], supports[j])
-
-    plt.figure(figsize=(6, 5))
-    plt.imshow(mat, vmin=0, vmax=1)
-    plt.colorbar(label="Jaccard")
-    plt.tight_layout()
-    if savepath:
-        plt.savefig(savepath)
-    plt.close()
-
+    print("\n===== Predictive metrics =====")
+    print(final["pred_table"].to_string(index=False))
 
 def save_run_artifacts(out, save_cfg,):
     if save_cfg.output_dir is None:
@@ -774,52 +722,9 @@ def save_run_artifacts(out, save_cfg,):
         plot_support_overlap_heatmap(history_df, savepath=os.path.join(outdir, "support_overlap_heatmap.png"))
 
 
-# ==========================================================
-# Main experiment wrapper compatible with the user's API
-# ==========================================================
-
-
-def finalize_selected_checkpoint(
-    model,
-    selected_ckpt_id,
-    checkpoints,
-    X_train, y_train,
-    X_val, y_val,
-    X_test, y_test,
-    sigma2,
-    beta_true,
-    cfg,
-    device=None,
-):
-    if device is None:
-        device = next(model.parameters()).device
-
-    load_model_state(model, checkpoints[selected_ckpt_id]["state"], device=device)
-    tau = checkpoints[selected_ckpt_id]["meta"]["tau"]
-    model.generative_model.set_tau(float(tau))
-
-    draws = sample_posterior_latents(model, R=cfg.diag_R_final)
-    hard = hard_support_from_draws(draws, support_threshold=cfg.support_threshold)
-
-    train_metrics = predictive_metrics(X_train, y_train, hard["beta_hard_samples"], sigma2=sigma2)
-    val_metrics = predictive_metrics(X_val, y_val, hard["beta_hard_samples"], sigma2=sigma2)
-    test_metrics = predictive_metrics(X_test, y_test, hard["beta_hard_samples"], sigma2=sigma2)
-
-    selection_metrics = selection_metrics_from_support(hard["support_idx"], beta_true=beta_true)
-
-    return {
-        "selected_support": hard["support_idx"],
-        "beta_hard_mean": hard["beta_hard_mean"],
-        "train_metrics": train_metrics,
-        "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
-        "selection_metrics": selection_metrics,
-    }
-
-
-def simflow_stagewise(build_flow_vi, simfun1, seed=123, device: Optional[torch.device] = None,
-    dtype: torch.dtype = torch.float32, hidden_units=64, num_hidden_layers=2, 
-    n = 180, p = 100, snr = 3.0, true_prop = 0.1, tau_end = 0.40, K_q = 8, K_g = 8,
+def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, device: Optional[torch.device] = None, family="gaussian",
+    dtype: torch.dtype = torch.float32, hidden_units=64, num_hidden_layers=2, show_start: bool = True, show_final: bool = True,
+    n = 180, p = 100, snr = 3.0, true_prop = 0.1, tau_end = 0.40, K_q = 8, K_g = 8, top_k: int = 20,
     schedule_cfg: Optional[StagewiseAnnealConfig] = None, split_cfg: Optional[SplitConfig] = None, save_cfg: Optional[SaveConfig] = None,):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -830,7 +735,11 @@ def simflow_stagewise(build_flow_vi, simfun1, seed=123, device: Optional[torch.d
     if save_cfg is None:
         save_cfg = SaveConfig(output_dir=None)
 
-    X, y, beta_true, sim_info = simfun1(n=n, p=p, seed=seed, snr=snr, true_prop=true_prop, device=device, dtype=dtype,)
+    X, y, beta_true, sim_info = simfun(n=n, p=p, seed=seed, snr=snr, true_prop=true_prop, device=device, dtype=dtype,)
+
+    if show_start:
+        print("===== Simulation info =====")
+        print(sim_info)
 
     splits = split_data_tensors(X, y, split_cfg)
 
@@ -839,6 +748,7 @@ def simflow_stagewise(build_flow_vi, simfun1, seed=123, device: Optional[torch.d
         y=splits["y_train"],
         sigma2=sim_info["sigma2"],
         tau=schedule_cfg.tau_start,
+        family=family,
         K_q=K_q,
         K_g=K_g,
         hidden_units=hidden_units,
@@ -849,6 +759,7 @@ def simflow_stagewise(build_flow_vi, simfun1, seed=123, device: Optional[torch.d
         model=model,
         X_val=splits["X_val"],
         y_val=splits["y_val"],
+        family=family,
         sigma2=sim_info["sigma2"],
         cfg=schedule_cfg,
         device=device,
@@ -877,11 +788,15 @@ def simflow_stagewise(build_flow_vi, simfun1, seed=123, device: Optional[torch.d
         "splits": splits,
         "beta_true": beta_true,
         "model": model,
-        "train_out": train_out,
+        **train_out,
         "final": final,
     }
 
     save_run_artifacts(out, save_cfg)
+
+    if show_final:
+        show_final_text_metrics(out, top_k=top_k)
+
     return out
 
 
@@ -917,115 +832,3 @@ def combine_benchmark_rows(rows: Sequence[pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(rows, axis=0, ignore_index=True)
 
 
-def show_run_summary(out: Dict[str, Any], top_k: int = 20) -> None:
-    meta = out["checkpoints"][out["selected_ckpt_id"]]["meta"]
-    final = out["final"]
-
-    print("===== Selected checkpoint =====")
-    print({
-        "ckpt_id": int(out["selected_ckpt_id"]),
-        "epoch": int(meta["epoch"]),
-        "stage": int(meta["stage"]),
-        "tau": float(meta["tau"]),
-        "support_size": int(meta["support_size"]),
-        "val_mse": float(meta["val_mse"]),
-        "loss_ema": float(meta["loss_ema"]),
-        "runtime_sec": float(out["runtime_sec"]),
-    })
-
-    print("\n===== Predictive metrics =====")
-    print(final["pred_table"].to_string(index=False))
-
-    if final["selection_metrics"]:
-        print("\n===== Selection metrics =====")
-        print(final["selection_metrics"])
-
-    print("\n===== Top variables by |beta_hard_mean| =====")
-    top_df = final["var_table"].copy()
-    top_df["abs_beta_hard_mean"] = top_df["beta_hard_mean"].abs()
-    view_cols = [c for c in ["j", "beta_hard_mean", "selected", "beta_true", "truth"] if c in top_df.columns]
-    print(top_df.sort_values("abs_beta_hard_mean", ascending=False).head(top_k)[view_cols].to_string(index=False))
-
-
-# ==========================================================
-# Suggested default profiles
-# ==========================================================
-
-
-def default_fast_profile(base_lr: float = 5e-5, tau_end: float = 0.45) -> StagewiseAnnealConfig:
-    return StagewiseAnnealConfig(
-        tau_start=1.0,
-        tau_end=tau_end,
-        warmup_epochs=150,
-        n_anneal_stages=4,
-        min_stage_epochs=60,
-        max_stage_epochs=140,
-        base_lr=base_lr,
-        stage_lr_decay=0.75,
-        eval_every=25,
-        checkpoint_every=25,
-        print_every=25,
-        diag_R_train=192,
-        diag_R_final=2000,
-    )
-
-
-
-def default_balanced_profile(base_lr: float = 5e-5, tau_end: float = 0.40) -> StagewiseAnnealConfig:
-    return StagewiseAnnealConfig(
-        tau_start=1.0,
-        tau_end=tau_end,
-        warmup_epochs=200,
-        n_anneal_stages=5,
-        min_stage_epochs=80,
-        max_stage_epochs=220,
-        base_lr=base_lr,
-        stage_lr_decay=0.70,
-        eval_every=25,
-        checkpoint_every=25,
-        print_every=25,
-        diag_R_train=256,
-        diag_R_final=4000,
-    )
-
-
-
-def default_slow_profile(base_lr: float = 5e-5, tau_end: float = 0.35) -> StagewiseAnnealConfig:
-    return StagewiseAnnealConfig(
-        tau_start=1.0,
-        tau_end=tau_end,
-        warmup_epochs=250,
-        n_anneal_stages=6,
-        min_stage_epochs=100,
-        max_stage_epochs=260,
-        base_lr=base_lr,
-        stage_lr_decay=0.65,
-        eval_every=25,
-        checkpoint_every=25,
-        print_every=25,
-        diag_R_train=320,
-        diag_R_final=5000,
-    )
-
-
-__all__ = [
-    "StagewiseAnnealConfig",
-    "SplitConfig",
-    "SaveConfig",
-    "default_fast_profile",
-    "default_balanced_profile",
-    "default_slow_profile",
-    "sample_posterior_latents",
-    "hard_support_from_draws",
-    "predictive_metrics",
-    "train_flow_stagewise",
-    "simflow_stagewise",
-    "benchmark_row_from_run",
-    "combine_benchmark_rows",
-    "show_run_summary",
-    "plot_training_overview",
-    "plot_support_vs_predictive",
-    "plot_boundary_density",
-    "plot_uncertainty_vs_abs_boundary",
-    "plot_support_overlap_heatmap",
-]
