@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-import json
-import math
-from dataclasses import asdict, dataclass, is_dataclass
-from pathlib import Path
+from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
+from .config import MeanFieldBenchmarkConfig, SplitConfig
+from .metric import gaussian_predictive_metrics, support_metrics
+from .simfun import extract_sim_arrays
+from .utils import Array, make_splits, predict_linear, recover_original_scale
 
-Array = np.ndarray
+
+BenchmarkConfig = MeanFieldBenchmarkConfig
+
+
+# -----------------------------------------------------------------------------
+# Benchmark table helpers
+# -----------------------------------------------------------------------------
 
 def top_var_table(
     *,
@@ -19,55 +26,69 @@ def top_var_table(
     support_score: Array,
     selected_support: Sequence[int],
     beta_true: Optional[Array],
-    top_k: int = 20,
+    top_k: Optional[int] = None,
     score_name: str = "support_score",
 ) -> pd.DataFrame:
     selected_mask = np.zeros(len(beta_mean), dtype=int)
     if len(selected_support) > 0:
         selected_mask[list(selected_support)] = 1
-    df = pd.DataFrame({
-        "j": np.arange(len(beta_mean), dtype=int),
-        "beta_mean": beta_mean,
-        "beta_sd": beta_sd,
-        score_name: support_score,
-        "selected": selected_mask,
-    })
+
+    df = pd.DataFrame(
+        {
+            "j": np.arange(len(beta_mean), dtype=int),
+            "beta_mean": beta_mean,
+            "beta_sd": beta_sd,
+            score_name: support_score,
+            "selected": selected_mask,
+        }
+    )
+
     if beta_true is not None:
         beta_true = np.asarray(beta_true)
         truth = (beta_true != 0.0).astype(int)
         df["beta_true"] = beta_true
         df["truth"] = truth
+
     df["abs_beta_mean"] = np.abs(df["beta_mean"])
     df = df.sort_values([score_name, "abs_beta_mean"], ascending=[False, False]).reset_index(drop=True)
+
+    if top_k is None:
+        return df
     return df.head(top_k)
 
 
 def benchmark_row_from_result(result: Mapping[str, Any]) -> Dict[str, Any]:
+    selection = result.get("selection_metrics", {}) or {}
+    pred = result.get("predictive_metrics", {}) or {}
+    sim_info = result.get("sim_info", {}) or {}
+
     row: Dict[str, Any] = {
         "method": result.get("method"),
         "seed": result.get("seed"),
         "runtime_sec": result.get("runtime_sec"),
         "converged": result.get("converged"),
         "n_iter": result.get("n_iter"),
-        "support_size": result.get("selection_metrics", {}).get("support_size"),
-        "precision": result.get("selection_metrics", {}).get("precision"),
-        "recall": result.get("selection_metrics", {}).get("recall"),
-        "f1": result.get("selection_metrics", {}).get("f1"),
-        "fdr": result.get("selection_metrics", {}).get("fdr"),
-        "tp": result.get("selection_metrics", {}).get("tp"),
-        "fp": result.get("selection_metrics", {}).get("fp"),
-        "fn": result.get("selection_metrics", {}).get("fn"),
-        "train_mse": result.get("predictive_metrics", {}).get("train", {}).get("mse"),
-        "val_mse": result.get("predictive_metrics", {}).get("val", {}).get("mse"),
-        "test_mse": result.get("predictive_metrics", {}).get("test", {}).get("mse"),
-        "train_r2": result.get("predictive_metrics", {}).get("train", {}).get("r2"),
-        "val_r2": result.get("predictive_metrics", {}).get("val", {}).get("r2"),
-        "test_r2": result.get("predictive_metrics", {}).get("test", {}).get("r2"),
-        "val_nll": result.get("predictive_metrics", {}).get("val", {}).get("nll"),
-        "test_nll": result.get("predictive_metrics", {}).get("test", {}).get("nll"),
+        "support_size": selection.get("support_size"),
+        "precision": selection.get("precision"),
+        "recall": selection.get("recall"),
+        "f1": selection.get("f1"),
+        "fdr": selection.get("fdr"),
+        "tp": selection.get("tp"),
+        "fp": selection.get("fp"),
+        "fn": selection.get("fn"),
+        "tn": selection.get("tn"),
+        "train_mse": pred.get("train", {}).get("mse"),
+        "val_mse": pred.get("val", {}).get("mse"),
+        "test_mse": pred.get("test", {}).get("mse"),
+        "train_r2": pred.get("train", {}).get("r2"),
+        "val_r2": pred.get("val", {}).get("r2"),
+        "test_r2": pred.get("test", {}).get("r2"),
+        "train_nll": pred.get("train", {}).get("nll"),
+        "val_nll": pred.get("val", {}).get("nll"),
+        "test_nll": pred.get("test", {}).get("nll"),
     }
-    sim_info = result.get("sim_info", {}) or {}
-    for key in ["n", "p", "snr", "true_prop", "n_active"]:
+
+    for key in ["n", "p", "snr", "true_prop", "n_active", "sigma2"]:
         if key in sim_info:
             row[key] = sim_info[key]
     return row
@@ -76,7 +97,6 @@ def benchmark_row_from_result(result: Mapping[str, Any]) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 # Shared result finalization for linear Gaussian baselines
 # -----------------------------------------------------------------------------
-
 
 def _finalize_linear_result(
     *,
@@ -103,27 +123,29 @@ def _finalize_linear_result(
         y_mean,
     )
     support_score = np.asarray(fit_out["support_score_std"], dtype=float)
-    selected_support = np.flatnonzero(support_score >= cfg.support_threshold).tolist()
+    selected_support = np.flatnonzero(support_score >= cfg.support_threshold).astype(int).tolist()
     sigma2 = float(fit_out.get("sigma2", max(np.var(y, ddof=0), 1e-12)))
     yhat = predict_linear(X, beta_mean, intercept)
 
-    pred_table = []
-    predictive_metrics = {}
+    pred_rows: List[Dict[str, Any]] = []
+    predictive_metrics: Dict[str, Dict[str, float]] = {}
     for split_name, idx in splits.items():
         split_metrics = gaussian_predictive_metrics(y[idx], yhat[idx], sigma2)
         predictive_metrics[split_name] = split_metrics
-        pred_table.append({"split": split_name, **split_metrics})
+        pred_rows.append({"split": split_name, **split_metrics})
 
     selection = support_metrics(selected_support, beta_true=beta_true, active_idx=active_idx, p=X.shape[1])
+
     var_df = top_var_table(
         beta_mean=beta_mean,
         beta_sd=beta_sd,
         support_score=support_score,
         selected_support=selected_support,
         beta_true=beta_true,
-        top_k=min(20, X.shape[1]),
+        top_k=None,
         score_name="support_score",
     )
+
     if beta_true is None and active_idx is not None:
         truth = np.zeros(X.shape[1], dtype=int)
         truth[np.asarray(active_idx, dtype=int)] = 1
@@ -148,7 +170,7 @@ def _finalize_linear_result(
         "pip": fit_out.get("pip_std"),
         "predictive_metrics": predictive_metrics,
         "selection_metrics": selection,
-        "pred_table": pd.DataFrame(pred_table),
+        "pred_table": pd.DataFrame(pred_rows),
         "var_table": var_df,
         "history": fit_out.get("history", pd.DataFrame()),
         "yhat": yhat,
@@ -162,80 +184,111 @@ def _finalize_linear_result(
 # Adapters for existing spike-and-slab and future MCMC
 # -----------------------------------------------------------------------------
 
-
 def adapt_existing_spike_slab_output(
     flow_out: Mapping[str, Any],
     *,
     method: str = "flow_spike_slab",
     benchmark_support_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """
-    Convert an existing spike-and-slab result object into the unified format.
-
-    Preferred raw fields to expose from the existing method are:
-      - beta_est or beta_mean
-      - beta_sd optional
-      - pip or support_score
-      - selected_support
-      - predictive_metrics / pred_table
-      - selection_metrics
-      - runtime_sec
-      - sim_info / splits
-    """
+    """Convert an existing flow/spike-and-slab result object into unified format."""
     out = dict(flow_out)
-    beta = np.asarray(out.get("beta_est", out.get("beta_mean", out.get("beta_hard_mean", []))), dtype=float)
-    beta_sd = np.asarray(out.get("beta_sd", np.zeros_like(beta)), dtype=float)
+    final = out.get("final", {}) or {}
 
-    score = out.get("support_score", out.get("pip", out.get("inclusion_prob", None)))
+    def pick(name: str, default=None):
+        if name in out:
+            return out[name]
+        if isinstance(final, Mapping) and name in final:
+            return final[name]
+        return default
+
+    beta = pick("beta_est", None)
+    if beta is None:
+        beta = pick("beta_mean", None)
+    if beta is None:
+        beta = pick("beta_hard_mean", None)
+    if beta is None and isinstance(final.get("var_table"), pd.DataFrame):
+        vt = final["var_table"]
+        for col in ["beta_mean", "beta_hard_mean", "beta_est"]:
+            if col in vt.columns:
+                beta = vt.sort_values("j")[col].to_numpy(dtype=float)
+                break
+    beta = np.asarray([] if beta is None else beta, dtype=float)
+
+    beta_sd = np.asarray(pick("beta_sd", np.zeros_like(beta)), dtype=float)
+
+    score = pick("support_score", None)
+    if score is None:
+        score = pick("pip", None)
+    if score is None:
+        score = pick("inclusion_prob", None)
+    if score is None and isinstance(final.get("var_table"), pd.DataFrame):
+        vt = final["var_table"]
+        for col in ["support_score", "pip", "hard_freq", "selected"]:
+            if col in vt.columns:
+                score = vt.sort_values("j")[col].to_numpy(dtype=float)
+                break
     if score is not None:
         score = np.asarray(score, dtype=float)
-    selected_support = out.get("selected_support", None)
+
+    selected_support = pick("selected_support", None)
+    if selected_support is None:
+        selected_support = pick("support_idx", None)
     if selected_support is None:
         if score is None:
             selected_support = []
         else:
             threshold = 0.5 if benchmark_support_threshold is None else benchmark_support_threshold
-            selected_support = np.flatnonzero(score >= threshold).tolist()
+            selected_support = np.flatnonzero(score >= threshold).astype(int).tolist()
 
-    pred_table = out.get("pred_table", pd.DataFrame())
+    pred_table = pick("pred_table", pd.DataFrame())
     if isinstance(pred_table, list):
         pred_table = pd.DataFrame(pred_table)
-    var_table = out.get("var_table", pd.DataFrame())
+
+    var_table = pick("var_table", pd.DataFrame())
     if isinstance(var_table, list):
         var_table = pd.DataFrame(var_table)
-
     if var_table.empty and beta.size > 0:
-        var_table = pd.DataFrame({
-            "j": np.arange(beta.size, dtype=int),
-            "beta_mean": beta,
-            "beta_sd": beta_sd,
-            "support_score": score if score is not None else np.zeros(beta.size),
-            "selected": np.isin(np.arange(beta.size), np.asarray(selected_support, dtype=int)).astype(int),
-        })
+        var_table = pd.DataFrame(
+            {
+                "j": np.arange(beta.size, dtype=int),
+                "beta_mean": beta,
+                "beta_sd": beta_sd if beta_sd.size == beta.size else np.zeros_like(beta),
+                "support_score": score if score is not None else np.zeros(beta.size),
+                "selected": np.isin(np.arange(beta.size), np.asarray(selected_support, dtype=int)).astype(int),
+            }
+        )
+
+    predictive_metrics = pick("predictive_metrics", None)
+    if predictive_metrics is None:
+        predictive_metrics = {
+            "train": final.get("train_metrics", {}),
+            "val": final.get("val_metrics", {}),
+            "test": final.get("test_metrics", {}),
+        }
 
     return {
         "method": method,
-        "seed": out.get("seed"),
-        "sim_info": out.get("sim_info", {}),
-        "splits": out.get("splits", {}),
-        "runtime_sec": out.get("runtime_sec"),
-        "converged": out.get("converged", True),
-        "n_iter": out.get("n_iter", None),
+        "seed": pick("seed", None),
+        "sim_info": pick("sim_info", {}),
+        "splits": pick("splits", {}),
+        "runtime_sec": pick("runtime_sec", None),
+        "converged": pick("converged", True),
+        "n_iter": pick("n_iter", None),
         "support_threshold": benchmark_support_threshold,
-        "beta_eps": out.get("beta_eps", None),
-        "intercept": out.get("intercept", 0.0),
-        "sigma2": out.get("sigma2", None),
-        "selected_support": list(selected_support),
+        "beta_eps": pick("beta_eps", None),
+        "intercept": pick("intercept", 0.0),
+        "sigma2": pick("sigma2", None),
+        "selected_support": list(map(int, selected_support)),
         "beta_est": beta,
         "beta_sd": beta_sd,
         "support_score": score,
-        "pip": out.get("pip", score),
-        "predictive_metrics": out.get("predictive_metrics", {}),
-        "selection_metrics": out.get("selection_metrics", {}),
+        "pip": pick("pip", score),
+        "predictive_metrics": predictive_metrics or {},
+        "selection_metrics": pick("selection_metrics", {}),
         "pred_table": pred_table,
         "var_table": var_table,
-        "history": out.get("history", pd.DataFrame()),
-        "config": out.get("config", {}),
+        "history": pick("history", out.get("history_df", pd.DataFrame())),
+        "config": pick("config", {}),
         "raw": out,
     }
 
@@ -248,7 +301,7 @@ def run_mcmc_placeholder(*args: Any, **kwargs: Any) -> Dict[str, Any]:
 
 
 def get_method_registry() -> Dict[str, Callable[..., Dict[str, Any]]]:
-    """Lazy registry to keep model files independent of core import order."""
+    """Lazy registry keeps model files independent of core import order."""
     from mf_spike_slab_model import run_mf_spike_slab
     from mf_ard_model import run_mf_ard
     from mf_bayes_lasso_model import run_mf_bayes_lasso
@@ -264,7 +317,6 @@ def get_method_registry() -> Dict[str, Callable[..., Dict[str, Any]]]:
 # -----------------------------------------------------------------------------
 # Benchmark orchestration
 # -----------------------------------------------------------------------------
-
 
 def run_baseline_method(
     *,
@@ -311,10 +363,12 @@ def run_one_setting_one_seed(
     sim_kwargs = dict(sim_kwargs or {})
     sim_payload = simfun(seed=seed, n=n, p=p, snr=snr, true_prop=true_prop, **sim_kwargs)
     sim = extract_sim_arrays(sim_payload)
+
     X = sim["X"]
     y = sim["y"]
     beta_true = sim.get("beta_true")
     active_idx = sim.get("active_idx")
+
     sim_info = {"n": n, "p": p, "snr": snr, "true_prop": true_prop}
     sim_info.update({k: v for k, v in sim.get("sim_info", {}).items() if k not in {"X", "y", "beta_true"}})
     if active_idx is not None:
@@ -326,6 +380,7 @@ def run_one_setting_one_seed(
 
     results: List[Dict[str, Any]] = []
     rows: List[Dict[str, Any]] = []
+
     for method in methods:
         if method in external_runners:
             out = external_runners[method](
@@ -386,7 +441,8 @@ def run_setting_grid(
         )
         all_results.extend(results)
         all_rows.append(rows)
-    return all_results, pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+    table = pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
+    return all_results, table
 
 
 def run_full_benchmark(
@@ -417,7 +473,3 @@ def run_full_benchmark(
         all_rows.append(rows)
     table = pd.concat(all_rows, axis=0, ignore_index=True) if all_rows else pd.DataFrame()
     return all_results, table
-
-
-
-

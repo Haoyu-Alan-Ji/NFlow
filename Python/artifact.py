@@ -1,29 +1,35 @@
-# artifact.py
+from __future__ import annotations
 
-import os
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
 
-from config import SaveConfig
-from utils import ensure_dir, NumpyJSONEncoder
+from .config import SaveConfig
+from .utils import NumpyJSONEncoder, ensure_dir
 
-from diagplot import (
-    plot_training_overview,
-    plot_support_vs_predictive,
-    plot_boundary_density,
-    plot_uncertainty_vs_abs_boundary,
-    plot_support_overlap_heatmap,
-)
+try:
+    from diagplot import (
+        plot_boundary_density,
+        plot_support_overlap_heatmap,
+        plot_support_vs_predictive,
+        plot_training_overview,
+        plot_uncertainty_vs_abs_boundary,
+    )
+except Exception:  # pragma: no cover
+    plot_training_overview = None
+    plot_support_vs_predictive = None
+    plot_boundary_density = None
+    plot_uncertainty_vs_abs_boundary = None
+    plot_support_overlap_heatmap = None
 
 
 def save_run_artifacts(out, save_cfg):
     if save_cfg.output_dir is None:
         return
-
     outdir = ensure_dir(save_cfg.output_dir)
     assert outdir is not None
 
@@ -33,9 +39,7 @@ def save_run_artifacts(out, save_cfg):
     if save_cfg.save_history_csv and isinstance(history_df, pd.DataFrame):
         hist_to_save = history_df.copy()
         if "support_idx" in hist_to_save.columns:
-            hist_to_save["support_idx"] = hist_to_save["support_idx"].apply(
-                lambda x: json.dumps(list(map(int, x)))
-            )
+            hist_to_save["support_idx"] = hist_to_save["support_idx"].apply(lambda x: json.dumps(list(map(int, x))))
         hist_to_save.to_csv(os.path.join(outdir, "history.csv"), index=False)
 
     if save_cfg.save_checkpoint_manifest:
@@ -44,20 +48,11 @@ def save_run_artifacts(out, save_cfg):
             meta = payload["meta"].copy()
             meta["support_idx"] = json.dumps(list(map(int, meta["support_idx"])))
             manifest.append(meta)
-        pd.DataFrame(manifest).to_csv(
-            os.path.join(outdir, "checkpoint_manifest.csv"),
-            index=False,
-        )
+        pd.DataFrame(manifest).to_csv(os.path.join(outdir, "checkpoint_manifest.csv"), index=False)
 
     if save_cfg.save_predictions_csv:
-        final["var_table"].to_csv(
-            os.path.join(outdir, "variable_table.csv"),
-            index=False,
-        )
-        final["pred_table"].to_csv(
-            os.path.join(outdir, "prediction_table.csv"),
-            index=False,
-        )
+        final["var_table"].to_csv(os.path.join(outdir, "variable_table.csv"), index=False)
+        final["pred_table"].to_csv(os.path.join(outdir, "prediction_table.csv"), index=False)
 
     if save_cfg.save_support_sets_json:
         support_sets = {
@@ -80,21 +75,15 @@ def save_run_artifacts(out, save_cfg):
             "val_metrics": final["val_metrics"],
             "test_metrics": final["test_metrics"],
         }
-        final_json["checkpoint_meta"]["support_idx"] = list(
-            map(int, final_json["checkpoint_meta"]["support_idx"])
-        )
+        final_json["checkpoint_meta"]["support_idx"] = list(map(int, final_json["checkpoint_meta"]["support_idx"]))
         with open(os.path.join(outdir, "final_summary.json"), "w", encoding="utf-8") as f:
             json.dump(final_json, f, indent=2)
 
     if save_cfg.save_plots:
-        plot_training_overview(
-            history_df,
-            os.path.join(outdir, "overview_4panel.png"),
-        )
-        plot_support_vs_predictive(
-            history_df,
-            os.path.join(outdir, "support_vs_predictive.png"),
-        )
+        if plot_training_overview is None:
+            raise ImportError("diagplot flow plotting functions are not available.")
+        plot_training_overview(history_df, os.path.join(outdir, "overview_4panel.png"))
+        plot_support_vs_predictive(history_df, os.path.join(outdir, "support_vs_predictive.png"))
         plot_boundary_density(
             boundary=final["boundary"],
             final_support=final["selected_support"],
@@ -107,62 +96,41 @@ def save_run_artifacts(out, save_cfg):
             hard_freq=final["hard_freq"],
             savepath=os.path.join(outdir, "uncertainty_vs_abs_boundary.png"),
         )
-        plot_support_overlap_heatmap(
-            history_df,
-            savepath=os.path.join(outdir, "support_overlap_heatmap.png"),
-        )
+        plot_support_overlap_heatmap(history_df, savepath=os.path.join(outdir, "support_overlap_heatmap.png"))
 
 
-# =============================================================================
-# Mean-field benchmark artifacts
-# Keep this function behavior identical to the old meanfield_benchmark_core.py.
-# =============================================================================
+def save_flow_run_artifacts(out, save_cfg):
+    return save_run_artifacts(out, save_cfg)
+
+
 def save_result_artifacts(result: Mapping[str, Any], save_cfg: SaveConfig) -> None:
     if not save_cfg.output_dir:
         return
-
     outdir = Path(save_cfg.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
-
     method = str(result.get("method", "unknown"))
     seed = result.get("seed", "na")
     stem = f"{method}_seed{seed}"
 
     if save_cfg.save_history_csv and isinstance(result.get("history"), pd.DataFrame):
         result["history"].to_csv(outdir / f"{stem}_history.csv", index=False)
-
     if save_cfg.save_predictions_csv:
         yhat = np.asarray(result.get("yhat", []), dtype=float)
         if yhat.size > 0:
-            pd.DataFrame({"yhat": yhat}).to_csv(
-                outdir / f"{stem}_predictions.csv",
-                index=False,
-            )
-
+            pd.DataFrame({"yhat": yhat}).to_csv(outdir / f"{stem}_predictions.csv", index=False)
     if save_cfg.save_var_table_csv and isinstance(result.get("var_table"), pd.DataFrame):
         result["var_table"].to_csv(outdir / f"{stem}_var_table.csv", index=False)
-
     if save_cfg.save_final_json:
-        json_payload = {
-            k: v
-            for k, v in result.items()
-            if k not in {"history", "pred_table", "var_table", "raw"}
-        }
+        json_payload = {k: v for k, v in result.items() if k not in {"history", "pred_table", "var_table", "raw"}}
         with open(outdir / f"{stem}_summary.json", "w", encoding="utf-8") as f:
-            json.dump(
-                json_payload,
-                f,
-                cls=NumpyJSONEncoder,
-                ensure_ascii=False,
-                indent=2,
-            )
+            json.dump(json_payload, f, cls=NumpyJSONEncoder, ensure_ascii=False, indent=2)
 
 
-def save_benchmark_table(
-    table: pd.DataFrame,
-    save_cfg: SaveConfig,
-    filename: str = "benchmark_table.csv",
-) -> None:
+def save_meanfield_result_artifacts(result: Mapping[str, Any], save_cfg: SaveConfig) -> None:
+    return save_result_artifacts(result, save_cfg)
+
+
+def save_benchmark_table(table: pd.DataFrame, save_cfg: SaveConfig, filename: str = "benchmark_table.csv") -> None:
     if save_cfg.output_dir and save_cfg.save_benchmark_csv:
         outdir = Path(save_cfg.output_dir)
         outdir.mkdir(parents=True, exist_ok=True)

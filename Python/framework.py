@@ -45,14 +45,14 @@ from .model import (
 
 from .simfun import simfun1
 
-from metric import (
+from .metric import (
     sample_posterior_latents,
     hard_support_from_draws,
     predictive_metrics,
     selection_metrics_from_support,
 )
 
-from artifact import save_run_artifacts
+from .artifact import save_run_artifacts
 
 # ==========================================================
 # Checkpoint diagnostics and selection

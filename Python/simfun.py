@@ -1,8 +1,11 @@
-import numpy as np
-import torch
+from __future__ import annotations
+
 from typing import Any, Dict, Mapping
 
-from utils import Array, as_numpy_1d, as_numpy_2d
+import numpy as np
+import torch
+from .utils import as_numpy_1d, as_numpy_2d
+
 
 def simfun1(n=180, p=100, seed=123, snr=3.0, true_prop=0.1, device=None, dtype=torch.float32,):
 
@@ -35,28 +38,13 @@ def simfun1(n=180, p=100, seed=123, snr=3.0, true_prop=0.1, device=None, dtype=t
 
     return X_t, y_t, beta_true_t, info
 
-
-
 def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
-    """
-    Extract X, y, beta_true and optional metadata from a simulation payload.
-
-    Supported formats:
-      1) dict-like with keys X, y, beta_true
-      2) tuple/list (X, y, beta_true)
-      3) dict-like with beta or active_idx instead of beta_true
-    """
+    """Extract X, y, beta_true, active_idx, and sim_info from a simulation payload."""
     if isinstance(sim, (tuple, list)):
         if len(sim) < 3:
-            raise ValueError(
-                "Tuple/list simulation payload must contain at least "
-                "(X, y, beta_true)."
-            )
-
+            raise ValueError("Tuple/list simulation payload must contain at least (X, y, beta_true).")
         X, y, beta_true = sim[:3]
-
         beta_true = as_numpy_1d(beta_true)
-
         return {
             "X": as_numpy_2d(X),
             "y": as_numpy_1d(y),
@@ -67,10 +55,8 @@ def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
 
     if isinstance(sim, Mapping):
         keys = {str(k).lower(): k for k in sim.keys()}
-
         X_key = keys.get("x")
         y_key = keys.get("y")
-
         if X_key is None or y_key is None:
             raise ValueError("Simulation payload must contain X and y.")
 
@@ -92,16 +78,10 @@ def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
         if beta_true is None and active_idx is not None:
             beta_true = np.zeros(X.shape[1], dtype=float)
             beta_true[active_idx] = 1.0
-
         if beta_true is not None and active_idx is None:
             active_idx = np.flatnonzero(beta_true != 0.0)
 
-        sim_info = {
-            k: v
-            for k, v in sim.items()
-            if k not in {X_key, y_key}
-        }
-
+        sim_info = {k: v for k, v in sim.items() if k not in {X_key, y_key}}
         return {
             "X": X,
             "y": y,
@@ -111,3 +91,24 @@ def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
         }
 
     raise TypeError(f"Unsupported simulation payload type: {type(sim)}")
+
+
+def simfun_demo(seed: int, n: int, p: int, snr: float, true_prop: float):
+    rng = np.random.default_rng(seed)
+    s = max(1, int(round(p * true_prop)))
+    active_idx = np.sort(rng.choice(p, size=s, replace=False))
+    X = rng.normal(size=(n, p))
+    beta_true = np.zeros(p, dtype=float)
+    beta_true[active_idx] = rng.normal(size=s)
+    signal = X @ beta_true
+    sigma2 = float(np.var(signal, ddof=0) / max(snr, 1e-8))
+    y = signal + rng.normal(scale=np.sqrt(max(sigma2, 1e-8)), size=n)
+    return {
+        "X": X,
+        "y": y,
+        "beta_true": beta_true,
+        "active_idx": active_idx,
+        "sigma2": sigma2,
+        "snr": snr,
+        "n_active": s,
+    }

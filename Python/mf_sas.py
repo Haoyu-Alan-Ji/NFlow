@@ -7,17 +7,14 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
-from meanfield_benchmark_core import (
-    Array,
-    BenchmarkConfig,
-    _finalize_linear_result,
-    center_response,
-    standardize_design,
-)
+
+from .config import MeanFieldBenchmarkConfig
+from .meanfield_benchmark_core import _finalize_linear_result
+from .utils import Array, center_response, standardize_design
 
 
 @dataclass
-class MFSpikeSlabConfig(BenchmarkConfig):
+class MFSpikeSlabConfig(MeanFieldBenchmarkConfig):
     pi: float = 0.10
     slab_var: float = 1.0
     a_sigma: float = 1.0
@@ -61,15 +58,20 @@ def _fit_mf_spike_slab(X: Array, y: Array, cfg: MFSpikeSlabConfig) -> Dict[str, 
         var_beta = alpha * (s2 + mu ** 2) - (alpha * mu) ** 2
         eresid = float(np.sum((y - fitted) ** 2) + np.sum(x2 * var_beta))
         if cfg.update_sigma2:
-            sigma2 = max((eresid + 2.0 * cfg.b_sigma) / (n + 2.0 * (cfg.a_sigma + 1.0)), cfg.min_sigma2)
+            sigma2 = max(
+                (eresid + 2.0 * cfg.b_sigma) / (n + 2.0 * (cfg.a_sigma + 1.0)),
+                cfg.min_sigma2,
+            )
 
-        hist.append({
-            "iter": float(it),
-            "sigma2": float(sigma2),
-            "eresid": float(eresid),
-            "max_delta": float(max_delta),
-            "support_size_0.5": float(np.sum(alpha >= 0.5)),
-        })
+        hist.append(
+            {
+                "iter": float(it),
+                "sigma2": float(sigma2),
+                "eresid": float(eresid),
+                "max_delta": float(max_delta),
+                "support_size_0.5": float(np.sum(alpha >= 0.5)),
+            }
+        )
         if max_delta < cfg.tol:
             converged = True
             break
@@ -104,9 +106,7 @@ def run_mf_spike_slab(
     cfg = cfg or MFSpikeSlabConfig()
     X_train, X_val, X_test = X[splits["train"]], X[splits["val"]], X[splits["test"]]
     y_train, y_val, y_test = y[splits["train"]], y[splits["val"]], y[splits["test"]]
-    X_train_s, X_val_s, X_test_s, x_mean, x_scale = standardize_design(
-        X_train, X_val, X_test, standardize_x=cfg.standardize_x
-    )
+    X_train_s, _, _, x_mean, x_scale = standardize_design(X_train, X_val, X_test, standardize_x=cfg.standardize_x)
     y_train_s, _, _, y_mean = center_response(y_train, y_val, y_test, center_y=cfg.center_y)
 
     t0 = time.perf_counter()

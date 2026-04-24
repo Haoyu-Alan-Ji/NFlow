@@ -7,18 +7,14 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from meanfield_benchmark_core import (
-    Array,
-    BenchmarkConfig,
-    _finalize_linear_result,
-    center_response,
-    prob_abs_gt_eps,
-    standardize_design,
-)
+from .config import MeanFieldBenchmarkConfig
+from .meanfield_benchmark_core import _finalize_linear_result
+from .metric import prob_abs_gt_eps
+from .utils import Array, center_response, standardize_design
 
 
 @dataclass
-class MFARDConfig(BenchmarkConfig):
+class MFARDConfig(MeanFieldBenchmarkConfig):
     a0: float = 1e-2
     b0: float = 1e-2
     c0: float = 1e-2
@@ -53,13 +49,15 @@ def _fit_mf_ard(X: Array, y: Array, cfg: MFARDConfig) -> Dict[str, Any]:
 
         eresid = float(np.sum((y - fitted) ** 2) + np.sum(x2 * s2))
         sigma2 = max((eresid + 2.0 * cfg.d0) / (n + 2.0 * (cfg.c0 + 1.0)), cfg.min_sigma2)
-        hist.append({
-            "iter": float(it),
-            "sigma2": float(sigma2),
-            "eresid": float(eresid),
-            "max_delta": float(max_delta),
-            "mean_tau": float(np.mean(tau_mean)),
-        })
+        hist.append(
+            {
+                "iter": float(it),
+                "sigma2": float(sigma2),
+                "eresid": float(eresid),
+                "max_delta": float(max_delta),
+                "mean_tau": float(np.mean(tau_mean)),
+            }
+        )
         if max_delta < cfg.tol:
             converged = True
             break
@@ -94,9 +92,7 @@ def run_mf_ard(
     cfg = cfg or MFARDConfig()
     X_train, X_val, X_test = X[splits["train"]], X[splits["val"]], X[splits["test"]]
     y_train, y_val, y_test = y[splits["train"]], y[splits["val"]], y[splits["test"]]
-    X_train_s, X_val_s, X_test_s, x_mean, x_scale = standardize_design(
-        X_train, X_val, X_test, standardize_x=cfg.standardize_x
-    )
+    X_train_s, _, _, x_mean, x_scale = standardize_design(X_train, X_val, X_test, standardize_x=cfg.standardize_x)
     y_train_s, _, _, y_mean = center_response(y_train, y_val, y_test, center_y=cfg.center_y)
 
     t0 = time.perf_counter()
@@ -119,3 +115,4 @@ def run_mf_ard(
         cfg=cfg,
         runtime_sec=runtime_sec,
     )
+
