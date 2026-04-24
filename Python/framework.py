@@ -15,151 +15,44 @@ import torch
 import torch.nn as nn
 import normflows as nf
 
-from .utils import EMA, jaccard_distance, rolling_stage_taus, make_optimizer, save_model_state, load_model_state, ensure_dir, split_data_tensors, set_optimizer_lr
-from .diagplot import plot_training_overview, plot_support_vs_predictive, plot_boundary_density, plot_uncertainty_vs_abs_boundary, plot_support_overlap_heatmap
+from .utils import (
+    EMA, 
+    jaccard_distance, 
+    rolling_stage_taus, 
+    make_optimizer, 
+    save_model_state, 
+    load_model_state, 
+    ensure_dir, 
+    split_data_tensors, 
+    set_optimizer_lr
+
+)
+from .diagplot import (
+    plot_training_overview, 
+    plot_support_vs_predictive, 
+    plot_boundary_density, 
+    plot_uncertainty_vs_abs_boundary, 
+    plot_support_overlap_heatmap
+)
+
 from .config import StagewiseAnnealConfig, SplitConfig, SaveConfig
-from .model import SemanticAffineCoupling, FlowMap, Relaxedsas, NBase, FlowVI, build_flow_vi
+
+from .model import (
+    SemanticAffineCoupling, 
+    FlowMap, Relaxedsas, NBase, FlowVI, 
+    build_flow_vi
+)
+
 from .simfun import simfun1
 
-# ==========================================================
-# Posterior sampling and hard-support diagnostics
-# ==========================================================
+from metric import (
+    sample_posterior_latents,
+    hard_support_from_draws,
+    predictive_metrics,
+    selection_metrics_from_support,
+)
 
-def sample_posterior_latents(model, R=2000):
-    model.eval()
-
-    sample = model.q0.rsample(R)
-    if isinstance(sample, tuple):
-        _, z0 = sample
-    else:
-        z0 = sample
-
-    flow_out = model.posterior_flow(z0, return_logdet=True)
-    if isinstance(flow_out, tuple):
-        eps = flow_out[0]
-    else:
-        eps = flow_out
-
-    dec = model.generative_model.decode(eps)
-    return {k: dec[k].detach().cpu() for k in ["s", "u", "t", "beta"]}
-
-
-def hard_support_from_draws(draws, support_threshold=0.5):
-    s = draws["s"]
-    u = draws["u"]
-    t = draws["t"]
-
-    if t.ndim == 1:
-        t = t.unsqueeze(1)
-
-    ind = (u > t).float()
-    vote_rate = ind.mean(dim=0)
-    support_mask = vote_rate > support_threshold
-    support_idx = torch.where(support_mask)[0].cpu().numpy().astype(int).tolist()
-
-    beta_hard_samples = s * ind
-    beta_hard_mean = beta_hard_samples.mean(dim=0)
-    boundary = (u - t).float()
-
-    return {
-        "support_idx": support_idx,
-        "support_mask": support_mask.cpu(),
-        "support_size": len(support_idx),
-        "beta_hard_samples": beta_hard_samples.cpu(),
-        "beta_hard_mean": beta_hard_mean.cpu(),
-        "boundary": boundary.cpu(),
-    }
-
-
-def posterior_predictions_from_hard_samples(X, beta_hard_samples, family="gaussian"):
-    eta = X.float().cpu() @ beta_hard_samples.float().cpu().T
-
-    if family == "gaussian":
-        return eta
-    elif family == "poisson":
-        return torch.exp(eta)
-    else:
-        raise ValueError(f"Unknown family: {family}")
-
-
-def predictive_metrics(X, y, beta_hard_samples, sigma2=None, family="gaussian"):
-    eta = X.float().cpu() @ beta_hard_samples.float().cpu().T
-
-    if family == "gaussian":
-        pred_draws = eta
-    elif family == "poisson":
-        pred_draws = torch.exp(eta)
-
-    yhat = pred_draws.mean(dim=1)
-    y = y.cpu().float().view(-1)
-
-    resid = y - yhat
-    mse = resid.pow(2).mean().item()
-    rmse = mse**0.5
-    mae = resid.abs().mean().item()
-
-    ss_res = resid.pow(2).sum().item()
-    ss_tot = ((y - y.mean())**2).sum().item()
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-
-    out = {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2}
-
-    if family == "gaussian":
-        if sigma2 is not None:
-            ll = -0.5 * (
-                ((y[:, None] - pred_draws) ** 2) / sigma2
-                + math.log(2 * math.pi * sigma2)
-            )
-            out["heldout_loglik"] = (
-                torch.logsumexp(ll, dim=1)
-                .sub(math.log(pred_draws.shape[1]))
-                .mean()
-                .item()
-            )
-            out["nll"] = -out["heldout_loglik"]
-
-    elif family == "poisson":
-        mu = pred_draws.clamp_min(1e-8)
-        ll = y[:, None] * torch.log(mu) - mu - torch.lgamma(y[:, None] + 1.0)
-
-        out["heldout_loglik"] = (
-            torch.logsumexp(ll, dim=1)
-            .sub(math.log(mu.shape[1]))
-            .mean()
-            .item()
-        )
-        out["nll"] = -out["heldout_loglik"]
-
-        y_safe = y.clamp_min(1e-8)
-        yhat_safe = yhat.clamp_min(1e-8)
-        dev = 2.0 * torch.where(
-            y > 0,
-            y * torch.log(y_safe / yhat_safe) - (y - yhat_safe),
-            -(y - yhat_safe),
-        )
-        out["poisson_deviance"] = dev.mean().item()
-
-    else:
-        raise ValueError(f"Unknown family: {family}")
-
-    return out
-
-
-def selection_metrics_from_support(support_idx, beta_true, eps=1e-12):
-    truth = (beta_true.cpu().abs() > eps).numpy().astype(int)
-    pred = np.zeros_like(truth)
-    pred[support_idx] = 1
-
-    tp = ((pred == 1) & (truth == 1)).sum()
-    fp = ((pred == 1) & (truth == 0)).sum()
-    fn = ((pred == 0) & (truth == 1)).sum()
-
-    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
-    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
-
-    return {"precision": precision, "recall": recall, "f1": f1}
-
+from artifact import save_run_artifacts
 
 # ==========================================================
 # Checkpoint diagnostics and selection
@@ -652,75 +545,6 @@ def show_final_text_metrics(out, top_k=20):
     print("\n===== Predictive metrics =====")
     print(final["pred_table"].to_string(index=False))
 
-def save_run_artifacts(out, save_cfg,):
-    if save_cfg.output_dir is None:
-        return
-    outdir = ensure_dir(save_cfg.output_dir)
-    assert outdir is not None
-
-    history_df = out["history_df"]
-    final = out["final"]
-
-    if save_cfg.save_history_csv and isinstance(history_df, pd.DataFrame):
-        hist_to_save = history_df.copy()
-        if "support_idx" in hist_to_save.columns:
-            hist_to_save["support_idx"] = hist_to_save["support_idx"].apply(lambda x: json.dumps(list(map(int, x))))
-        hist_to_save.to_csv(os.path.join(outdir, "history.csv"), index=False)
-
-    if save_cfg.save_checkpoint_manifest:
-        manifest = []
-        for ckpt_id, payload in out["checkpoints"].items():
-            meta = payload["meta"].copy()
-            meta["support_idx"] = json.dumps(list(map(int, meta["support_idx"])))
-            manifest.append(meta)
-        pd.DataFrame(manifest).to_csv(os.path.join(outdir, "checkpoint_manifest.csv"), index=False)
-
-    if save_cfg.save_predictions_csv:
-        final["var_table"].to_csv(os.path.join(outdir, "variable_table.csv"), index=False)
-        final["pred_table"].to_csv(os.path.join(outdir, "prediction_table.csv"), index=False)
-
-    if save_cfg.save_support_sets_json:
-        support_sets = {
-            "selected_ckpt_id": int(out["selected_ckpt_id"]),
-            "selected_support": list(map(int, final["selected_support"])),
-            "unstable_idx": list(map(int, final["unstable_idx"])),
-            "never_selected_idx": list(map(int, final["never_selected_idx"])),
-        }
-        with open(os.path.join(outdir, "support_sets.json"), "w", encoding="utf-8") as f:
-            json.dump(support_sets, f, indent=2)
-
-    if save_cfg.save_final_json:
-        final_json = {
-            "selected_ckpt_id": int(out["selected_ckpt_id"]),
-            "runtime_sec": float(out["runtime_sec"]),
-            "stage_summaries": out["stage_summaries"],
-            "checkpoint_meta": out["checkpoints"][out["selected_ckpt_id"]]["meta"],
-            "selection_metrics": final["selection_metrics"],
-            "train_metrics": final["train_metrics"],
-            "val_metrics": final["val_metrics"],
-            "test_metrics": final["test_metrics"],
-        }
-        final_json["checkpoint_meta"]["support_idx"] = list(map(int, final_json["checkpoint_meta"]["support_idx"]))
-        with open(os.path.join(outdir, "final_summary.json"), "w", encoding="utf-8") as f:
-            json.dump(final_json, f, indent=2)
-
-    if save_cfg.save_plots:
-        plot_training_overview(history_df, os.path.join(outdir, "overview_4panel.png"))
-        plot_support_vs_predictive(history_df, os.path.join(outdir, "support_vs_predictive.png"))
-        plot_boundary_density(
-            boundary=final["boundary"],
-            final_support=final["selected_support"],
-            unstable_idx=final["unstable_idx"],
-            never_selected_idx=final["never_selected_idx"],
-            savepath=os.path.join(outdir, "boundary_density.png"),
-        )
-        plot_uncertainty_vs_abs_boundary(
-            boundary=final["boundary"],
-            hard_freq=final["hard_freq"],
-            savepath=os.path.join(outdir, "uncertainty_vs_abs_boundary.png"),
-        )
-        plot_support_overlap_heatmap(history_df, savepath=os.path.join(outdir, "support_overlap_heatmap.png"))
-
 
 def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, device: Optional[torch.device] = None, family="gaussian",
     dtype: torch.dtype = torch.float32, hidden_units=64, num_hidden_layers=2, show_start: bool = True, show_final: bool = True,
@@ -799,36 +623,5 @@ def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, dev
 
     return out
 
-
-# ==========================================================
-# Benchmark utilities and textual summaries
-# ==========================================================
-
-
-def benchmark_row_from_run(out: Dict[str, Any], method_name: str = "flow_anneal") -> pd.DataFrame:
-    row = {
-        "method": method_name,
-        "runtime_sec": float(out["runtime_sec"]),
-        "selected_ckpt_id": int(out["selected_ckpt_id"]),
-        "selected_epoch": int(out["checkpoints"][out["selected_ckpt_id"]]["meta"]["epoch"]),
-        "selected_tau": float(out["checkpoints"][out["selected_ckpt_id"]]["meta"]["tau"]),
-        "selected_support_size": int(out["final"]["var_table"]["selected"].sum()),
-    }
-    for prefix, metrics in [
-        ("train", out["final"]["train_metrics"]),
-        ("val", out["final"]["val_metrics"]),
-        ("test", out["final"]["test_metrics"]),
-    ]:
-        for k, v in metrics.items():
-            row[f"{prefix}_{k}"] = v
-    for k, v in out["final"]["selection_metrics"].items():
-        row[f"sel_{k}"] = v
-    return pd.DataFrame([row])
-
-
-def combine_benchmark_rows(rows: Sequence[pd.DataFrame]) -> pd.DataFrame:
-    if len(rows) == 0:
-        return pd.DataFrame()
-    return pd.concat(rows, axis=0, ignore_index=True)
 
 
