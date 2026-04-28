@@ -59,18 +59,25 @@ class SplitConfig:
 @dataclass
 class SaveConfig:
     output_dir: Optional[str] = None
-    save_plots: bool = True
+
+    # common data outputs
+    save_summary_csv: bool = True
+    save_results_pickle: bool = True
+    save_metadata_json: bool = True
+    save_manifest_json: bool = True
+
+    # per-result tables
     save_history_csv: bool = True
-    save_checkpoint_manifest: bool = True
-    save_final_json: bool = True
     save_predictions_csv: bool = True
-    save_support_sets_json: bool = True
     save_var_table_csv: bool = True
-    save_benchmark_csv: bool = True
+    save_support_sets_json: bool = True
+
+    # optional large output
+    save_yhat_csv: bool = False
 
 
 @dataclass
-class MeanFieldBenchmarkConfig:
+class BenchmarkConfig:
     support_threshold: float = 0.5
     beta_eps: float = 0.10
     standardize_x: bool = True
@@ -80,5 +87,5 @@ class MeanFieldBenchmarkConfig:
     verbose: bool = False
 
 
-BenchmarkConfig = MeanFieldBenchmarkConfig
+
 

@@ -93,22 +93,335 @@ def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
     raise TypeError(f"Unsupported simulation payload type: {type(sim)}")
 
 
-def simfun_demo(seed: int, n: int, p: int, snr: float, true_prop: float):
+def simfun_block_corr(
+    n=180,
+    p=100,
+    seed=123,
+    snr=2.5,
+    true_prop=0.1,
+    rho=0.8,
+    block_size=10,
+    beta_low=0.8,
+    beta_high=1.8,
+    device=None,
+    dtype=None,
+):
+    """
+    Block-correlated sparse linear regression simulation.
+
+    Data-generating model:
+        y = X beta + eps
+
+    X has block-wise AR(1) correlation:
+        Corr(X_j, X_k) = rho ** |j-k| within each block.
+
+    Parameters
+    ----------
+    n : int
+        Number of observations.
+
+    p : int
+        Number of predictors.
+
+    seed : int
+        Random seed.
+
+    snr : float
+        Signal-to-noise ratio:
+            snr = Var(X beta) / sigma^2
+
+    true_prop : float
+        Proportion of active variables.
+
+    rho : float
+        Within-block AR(1) correlation.
+
+    block_size : int
+        Number of variables per block.
+
+    beta_low, beta_high : float
+        Active coefficient magnitudes are sampled uniformly from
+        [beta_low, beta_high], with random signs.
+
+    device, dtype:
+        Torch device and dtype.
+
+    Returns
+    -------
+    X : torch.Tensor, shape (n, p)
+    y : torch.Tensor, shape (n,)
+    beta_true : torch.Tensor, shape (p,)
+    info : dict
+    """
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if dtype is None:
+        dtype = torch.float32
+
     rng = np.random.default_rng(seed)
-    s = max(1, int(round(p * true_prop)))
-    active_idx = np.sort(rng.choice(p, size=s, replace=False))
-    X = rng.normal(size=(n, p))
-    beta_true = np.zeros(p, dtype=float)
-    beta_true[active_idx] = rng.normal(size=s)
-    signal = X @ beta_true
-    sigma2 = float(np.var(signal, ddof=0) / max(snr, 1e-8))
-    y = signal + rng.normal(scale=np.sqrt(max(sigma2, 1e-8)), size=n)
-    return {
-        "X": X,
-        "y": y,
-        "beta_true": beta_true,
+
+    n_active = int(round(p * true_prop))
+    n_active = max(1, min(n_active, p))
+
+    # ----------------------------
+    # Build block-correlated X
+    # ----------------------------
+    blocks = []
+    remaining = p
+
+    while remaining > 0:
+        b = min(block_size, remaining)
+
+        idx = np.arange(b)
+        Sigma = rho ** np.abs(idx[:, None] - idx[None, :])
+
+        X_block = rng.multivariate_normal(
+            mean=np.zeros(b),
+            cov=Sigma,
+            size=n,
+        )
+
+        blocks.append(X_block)
+        remaining -= b
+
+    X_np = np.concatenate(blocks, axis=1)
+
+    # Standardize columns at the data-generation level.
+    X_np = X_np - X_np.mean(axis=0, keepdims=True)
+    X_np = X_np / (X_np.std(axis=0, ddof=0, keepdims=True) + 1e-12)
+
+    # ----------------------------
+    # Sparse beta
+    # ----------------------------
+    active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
+
+    beta_np = np.zeros(p, dtype=float)
+    signs = rng.choice([-1.0, 1.0], size=n_active)
+    mags = rng.uniform(beta_low, beta_high, size=n_active)
+    beta_np[active_idx] = signs * mags
+
+    # ----------------------------
+    # Generate y with target SNR
+    # ----------------------------
+    signal = X_np @ beta_np
+    signal_var = float(np.var(signal, ddof=0))
+
+    sigma2 = signal_var / float(snr)
+    sigma = float(np.sqrt(sigma2))
+
+    eps = rng.normal(loc=0.0, scale=sigma, size=n)
+    y_np = signal + eps
+
+    # Center y at generation level only if you want.
+    # I leave it uncentered because your workflow already handles center_y.
+    # y_np = y_np - y_np.mean()
+
+    X = torch.as_tensor(X_np, dtype=dtype, device=device)
+    y = torch.as_tensor(y_np, dtype=dtype, device=device)
+    beta_true = torch.as_tensor(beta_np, dtype=dtype, device=device)
+
+    info = {
+        "sim": "block_corr",
+        "n": n,
+        "p": p,
+        "n_active": n_active,
         "active_idx": active_idx,
-        "sigma2": sigma2,
-        "snr": snr,
-        "n_active": s,
+        "snr": float(snr),
+        "sigma2": float(sigma2),
+        "sigma": float(sigma),
+        "rho": float(rho),
+        "block_size": int(block_size),
+        "beta_low": float(beta_low),
+        "beta_high": float(beta_high),
     }
+
+    return X, y, beta_true, info
+
+def simfun_group_competition(
+    n=180,
+    p=100,
+    seed=123,
+    snr=2.5,
+    true_prop=0.1,
+    group_size=10,
+    noise_x=0.15,
+    beta_low=0.8,
+    beta_high=1.8,
+    one_active_per_group=True,
+    device=None,
+    dtype=None,
+):
+    """
+    Group-competition sparse linear regression simulation.
+
+    Data-generating model:
+        y = X beta + eps
+
+    Within each group:
+        X_{g,j} = z_g + noise_x * eta_{g,j}
+
+    When noise_x is small, variables inside the same group are nearly
+    exchangeable. This creates support ambiguity and one-of-K competition.
+
+    Parameters
+    ----------
+    n : int
+        Number of observations.
+
+    p : int
+        Number of predictors.
+
+    seed : int
+        Random seed.
+
+    snr : float
+        Signal-to-noise ratio:
+            snr = Var(X beta) / sigma^2
+
+    true_prop : float
+        Proportion of active variables.
+
+    group_size : int
+        Number of variables per group.
+
+    noise_x : float
+        Within-group idiosyncratic noise level.
+        Smaller values create stronger competition.
+
+    beta_low, beta_high : float
+        Active coefficient magnitudes are sampled uniformly from
+        [beta_low, beta_high], with random signs.
+
+    one_active_per_group : bool
+        If True, active variables are chosen from distinct groups whenever possible.
+
+    device, dtype:
+        Torch device and dtype.
+
+    Returns
+    -------
+    X : torch.Tensor, shape (n, p)
+    y : torch.Tensor, shape (n,)
+    beta_true : torch.Tensor, shape (p,)
+    info : dict
+    """
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if dtype is None:
+        dtype = torch.float32
+
+    rng = np.random.default_rng(seed)
+
+    n_active = int(round(p * true_prop))
+    n_active = max(1, min(n_active, p))
+
+    # ----------------------------
+    # Construct group structure
+    # ----------------------------
+    n_groups = int(np.ceil(p / group_size))
+
+    groups = []
+    start = 0
+    for g in range(n_groups):
+        end = min(start + group_size, p)
+        groups.append(np.arange(start, end))
+        start = end
+
+    # ----------------------------
+    # Build group-competition X
+    # ----------------------------
+    X_np = np.zeros((n, p), dtype=float)
+
+    for g, cols in enumerate(groups):
+        z_g = rng.normal(loc=0.0, scale=1.0, size=(n, 1))
+        eta_g = rng.normal(loc=0.0, scale=1.0, size=(n, len(cols)))
+
+        X_np[:, cols] = z_g + noise_x * eta_g
+
+    # Standardize columns at the data-generation level.
+    X_np = X_np - X_np.mean(axis=0, keepdims=True)
+    X_np = X_np / (X_np.std(axis=0, ddof=0, keepdims=True) + 1e-12)
+
+    # ----------------------------
+    # Choose active variables
+    # ----------------------------
+    if one_active_per_group:
+        # Choose active groups first.
+        n_active_groups = min(n_active, n_groups)
+        active_groups = rng.choice(n_groups, size=n_active_groups, replace=False)
+
+        active_list = []
+        for g in active_groups:
+            cols = groups[g]
+            active_list.append(rng.choice(cols))
+
+        # If n_active > n_groups, fill remaining active variables randomly.
+        if n_active > n_active_groups:
+            remaining_candidates = np.setdiff1d(
+                np.arange(p),
+                np.asarray(active_list, dtype=int),
+            )
+            extra = rng.choice(
+                remaining_candidates,
+                size=n_active - n_active_groups,
+                replace=False,
+            )
+            active_list.extend(extra.tolist())
+
+        active_idx = np.sort(np.asarray(active_list, dtype=int))
+
+    else:
+        active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
+
+    beta_np = np.zeros(p, dtype=float)
+    signs = rng.choice([-1.0, 1.0], size=len(active_idx))
+    mags = rng.uniform(beta_low, beta_high, size=len(active_idx))
+    beta_np[active_idx] = signs * mags
+
+    # ----------------------------
+    # Generate y with target SNR
+    # ----------------------------
+    signal = X_np @ beta_np
+    signal_var = float(np.var(signal, ddof=0))
+
+    sigma2 = signal_var / float(snr)
+    sigma = float(np.sqrt(sigma2))
+
+    eps = rng.normal(loc=0.0, scale=sigma, size=n)
+    y_np = signal + eps
+
+    X = torch.as_tensor(X_np, dtype=dtype, device=device)
+    y = torch.as_tensor(y_np, dtype=dtype, device=device)
+    beta_true = torch.as_tensor(beta_np, dtype=dtype, device=device)
+
+    # Group id for each variable.
+    group_id = np.empty(p, dtype=int)
+    for g, cols in enumerate(groups):
+        group_id[cols] = g
+
+    active_groups = np.unique(group_id[active_idx])
+
+    info = {
+        "sim": "group_competition",
+        "n": n,
+        "p": p,
+        "n_active": len(active_idx),
+        "active_idx": active_idx,
+        "snr": float(snr),
+        "sigma2": float(sigma2),
+        "sigma": float(sigma),
+        "group_size": int(group_size),
+        "n_groups": int(n_groups),
+        "noise_x": float(noise_x),
+        "one_active_per_group": bool(one_active_per_group),
+        "group_id": group_id,
+        "active_groups": active_groups,
+        "beta_low": float(beta_low),
+        "beta_high": float(beta_high),
+    }
+
+    return X, y, beta_true, info

@@ -8,13 +8,13 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from .config import MeanFieldBenchmarkConfig
-from .meanfield_benchmark_core import _finalize_linear_result
+from .config import BenchmarkConfig
+from .benchmark_tools import _finalize_linear_result
 from .utils import Array, center_response, standardize_design
 
 
 @dataclass
-class MFSpikeSlabConfig(MeanFieldBenchmarkConfig):
+class MFSpikeSlabConfig(BenchmarkConfig):
     pi: float = 0.10
     slab_var: float = 1.0
     a_sigma: float = 1.0

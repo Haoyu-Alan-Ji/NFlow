@@ -122,7 +122,7 @@ def load_model_state(model, state, device=None) -> None:
         model.load_state_dict(moved)
 
 
-def make_split_indices(n: int, split_cfg) -> Dict[str, Array]:
+def make_split(n: int, split_cfg) -> Dict[str, np.ndarray]:
     if not math.isclose(
         split_cfg.train_frac + split_cfg.val_frac + split_cfg.test_frac,
         1.0,
@@ -130,12 +130,16 @@ def make_split_indices(n: int, split_cfg) -> Dict[str, Array]:
         abs_tol=1e-9,
     ):
         raise ValueError("train_frac + val_frac + test_frac must equal 1.")
+
     rng = np.random.default_rng(split_cfg.seed)
     idx = rng.permutation(n)
+
     n_train = int(round(n * split_cfg.train_frac))
     n_val = int(round(n * split_cfg.val_frac))
+
     n_train = min(max(n_train, 1), n - 2)
     n_val = min(max(n_val, 1), n - n_train - 1)
+
     return {
         "train": idx[:n_train],
         "val": idx[n_train:n_train + n_val],
@@ -143,52 +147,74 @@ def make_split_indices(n: int, split_cfg) -> Dict[str, Array]:
     }
 
 
-make_splits = make_split_indices
+def split_data(
+    X,
+    y,
+    splits,
+    *,
+    mode: str = "auto",
+) -> Dict[str, Any]:
+    if mode not in {"auto", "numpy", "tensor"}:
+        raise ValueError("mode must be one of: 'auto', 'numpy', 'tensor'.")
 
+    if mode == "auto":
+        try:
+            import torch
+            mode = "tensor" if isinstance(X, torch.Tensor) else "numpy"
+        except ImportError:
+            mode = "numpy"
 
-def split_data_arrays(X: Array, y: Array, split_cfg) -> Dict[str, Array]:
-    splits = make_split_indices(X.shape[0], split_cfg)
-    return {
-        "X_train": X[splits["train"]],
-        "y_train": y[splits["train"]],
-        "X_val": X[splits["val"]],
-        "y_val": y[splits["val"]],
-        "X_test": X[splits["test"]],
-        "y_test": y[splits["test"]],
-        "idx_train": splits["train"],
-        "idx_val": splits["val"],
-        "idx_test": splits["test"],
-    }
+    if mode == "numpy":
+        idx_train = np.asarray(splits["train"], dtype=int)
+        idx_val = np.asarray(splits["val"], dtype=int)
+        idx_test = np.asarray(splits["test"], dtype=int)
 
+        return {
+            "X_train": X[idx_train],
+            "y_train": y[idx_train],
+            "X_val": X[idx_val],
+            "y_val": y[idx_val],
+            "X_test": X[idx_test],
+            "y_test": y[idx_test],
+            "idx_train": idx_train,
+            "idx_val": idx_val,
+            "idx_test": idx_test,
+            "indices": {
+                "train": idx_train,
+                "val": idx_val,
+                "test": idx_test,
+            },
+        }
 
-def split_data_tensors(X, y, split_cfg):
-    import torch
-    n = X.shape[0]
-    g = torch.Generator(device=X.device)
-    g.manual_seed(split_cfg.seed)
-    perm = torch.randperm(n, generator=g, device=X.device)
-    n_train = int(round(n * split_cfg.train_frac))
-    n_val = int(round(n * split_cfg.val_frac))
-    n_train = min(max(n_train, 1), n - 2)
-    n_val = min(max(n_val, 1), n - n_train - 1)
-    n_test = n - n_train - n_val
-    if n_test <= 0:
-        n_test = 1
-        n_val = max(1, n_val - 1)
-    idx_train = perm[:n_train]
-    idx_val = perm[n_train:n_train + n_val]
-    idx_test = perm[n_train + n_val:]
-    return {
-        "X_train": X[idx_train],
-        "y_train": y[idx_train],
-        "X_val": X[idx_val],
-        "y_val": y[idx_val],
-        "X_test": X[idx_test],
-        "y_test": y[idx_test],
-        "idx_train": idx_train.detach().cpu(),
-        "idx_val": idx_val.detach().cpu(),
-        "idx_test": idx_test.detach().cpu(),
-    }
+    if mode == "tensor":
+        import torch
+
+        device = X.device
+
+        idx_train_np = np.asarray(splits["train"], dtype=int)
+        idx_val_np = np.asarray(splits["val"], dtype=int)
+        idx_test_np = np.asarray(splits["test"], dtype=int)
+
+        idx_train = torch.as_tensor(idx_train_np, dtype=torch.long, device=device)
+        idx_val = torch.as_tensor(idx_val_np, dtype=torch.long, device=device)
+        idx_test = torch.as_tensor(idx_test_np, dtype=torch.long, device=device)
+
+        return {
+            "X_train": X[idx_train],
+            "y_train": y[idx_train],
+            "X_val": X[idx_val],
+            "y_val": y[idx_val],
+            "X_test": X[idx_test],
+            "y_test": y[idx_test],
+            "idx_train": idx_train.detach().cpu(),
+            "idx_val": idx_val.detach().cpu(),
+            "idx_test": idx_test.detach().cpu(),
+            "indices": {
+                "train": idx_train_np,
+                "val": idx_val_np,
+                "test": idx_test_np,
+            },
+        }
 
 
 def standardize_design(

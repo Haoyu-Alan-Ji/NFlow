@@ -3,13 +3,12 @@ import json
 import time
 import math
 import copy
-
+import random
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -22,41 +21,25 @@ from .utils import (
     make_optimizer, 
     save_model_state, 
     load_model_state, 
-    ensure_dir, 
-    split_data_tensors, 
+    make_split, 
+    split_data, 
     set_optimizer_lr
-
-)
-from .diagplot import (
-    plot_training_overview, 
-    plot_support_vs_predictive, 
-    plot_boundary_density, 
-    plot_uncertainty_vs_abs_boundary, 
-    plot_support_overlap_heatmap
 )
 
 from .config import StagewiseAnnealConfig, SplitConfig, SaveConfig
 
-from .model import (
-    SemanticAffineCoupling, 
-    FlowMap, Relaxedsas, NBase, FlowVI, 
-    build_flow_vi
-)
-
-from .simfun import simfun1
+from .model import build_flow_vi
 
 from .metric import (
     sample_posterior_latents,
     hard_support_from_draws,
     predictive_metrics,
     selection_metrics_from_support,
+    flow_row_from_result,
+    print_result
 )
 
 from .artifact import save_run_artifacts
-
-# ==========================================================
-# Checkpoint diagnostics and selection
-# ==========================================================
 
 
 def evaluate_checkpoint(
@@ -418,11 +401,6 @@ def train_flow_stagewise(model, X_val, y_val, sigma2, family, cfg, device,):
     }
 
 
-# ==========================================================
-# Main experiment wrapper compatible with the user's API
-# ==========================================================
-
-
 def finalize_selected_checkpoint(
     model: torch.nn.Module,
     selected_ckpt_id: int,
@@ -506,50 +484,26 @@ def finalize_selected_checkpoint(
         "pred_table": pred_table,
     }
 
-def show_final_text_metrics(out, top_k=20):
-    train_block = out["train_out"] if "train_out" in out else out
-    sel_id = train_block["selected_ckpt_id"]
-    sel_meta = train_block["checkpoints"][sel_id]["meta"]
-    final = out["final"]
+def set_all_seeds(seed: int, deterministic: bool = False):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-    ckpt_df = pd.DataFrame([{
-        "ckpt_id": int(sel_id),
-        "epoch": int(sel_meta["epoch"]),
-        "stage": int(sel_meta["stage"]),
-        "tau": float(sel_meta["tau"]),
-        "support_size": int(sel_meta["support_size"]),
-        "loss": float(sel_meta["loss"]),
-        "runtime_sec": float(train_block["runtime_sec"]),
-    }])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
-    print("===== Selected checkpoint =====")
-    print(ckpt_df.to_string(index=False))
-
-    print("\n===== Selection metrics =====")
-    sel_df = pd.DataFrame([final["selection_metrics"]])
-    print(sel_df.to_string(index=False))
-
-    print("\n===== Selected support =====")
-    print(final["selected_support"])
-
-    print("\n===== Top variables by |beta_hard_mean| =====")
-    top_df = final["var_table"].copy()
-    top_df["abs_beta_hard_mean"] = top_df["beta_hard_mean"].abs()
-    view_cols = [c for c in ["j", "beta_hard_mean", "selected", "beta_true", "truth"] if c in top_df.columns]
-    print(
-        top_df.sort_values("abs_beta_hard_mean", ascending=False)
-              .head(top_k)[view_cols]
-              .to_string(index=False)
-    )
-
-    print("\n===== Predictive metrics =====")
-    print(final["pred_table"].to_string(index=False))
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
-def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, device: Optional[torch.device] = None, family="gaussian",
-    dtype: torch.dtype = torch.float32, hidden_units=64, num_hidden_layers=2, show_start: bool = True, show_final: bool = True,
-    n = 180, p = 100, snr = 3.0, true_prop = 0.1, tau_end = 0.40, K_q = 8, K_g = 8, top_k: int = 20,
+def simflow_stagewise(X, y, beta_true=None, sim_info=None, build_flow_vi=build_flow_vi, seed=123, device: Optional[torch.device] = None, 
+    family="gaussian", hidden_units=64, num_hidden_layers=2, show_start=True, show_final=True, tau_end = 0.40, K_q = 8, K_g = 8,
     schedule_cfg: Optional[StagewiseAnnealConfig] = None, split_cfg: Optional[SplitConfig] = None, save_cfg: Optional[SaveConfig] = None,):
+    
+    set_all_seeds(seed, deterministic=False)
+
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if schedule_cfg is None:
@@ -559,13 +513,12 @@ def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, dev
     if save_cfg is None:
         save_cfg = SaveConfig(output_dir=None)
 
-    X, y, beta_true, sim_info = simfun(n=n, p=p, seed=seed, snr=snr, true_prop=true_prop, device=device, dtype=dtype,)
-
     if show_start:
         print("===== Simulation info =====")
         print(sim_info)
 
-    splits = split_data_tensors(X, y, split_cfg)
+    split_indices = make_split(X.shape[0], split_cfg)
+    splits = split_data(X, y, split_indices, mode="tensor")
 
     model = build_flow_vi(
         X=splits["X_train"],
@@ -607,6 +560,7 @@ def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, dev
     )
 
     out = {
+        "method": "flow_stagewise",
         "seed": seed,
         "sim_info": sim_info,
         "splits": splits,
@@ -616,10 +570,11 @@ def simflow_stagewise(build_flow_vi=build_flow_vi, simfun=simfun1, seed=123, dev
         "final": final,
     }
 
+    out["summary_row"] = flow_row_from_result(out)
     save_run_artifacts(out, save_cfg)
 
     if show_final:
-        show_final_text_metrics(out, top_k=top_k)
+        print_result(out, top_k=20)
 
     return out
 

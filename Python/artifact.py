@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -11,25 +12,12 @@ import pandas as pd
 from .config import SaveConfig
 from .utils import NumpyJSONEncoder, ensure_dir
 
-try:
-    from diagplot import (
-        plot_boundary_density,
-        plot_support_overlap_heatmap,
-        plot_support_vs_predictive,
-        plot_training_overview,
-        plot_uncertainty_vs_abs_boundary,
-    )
-except Exception:  # pragma: no cover
-    plot_training_overview = None
-    plot_support_vs_predictive = None
-    plot_boundary_density = None
-    plot_uncertainty_vs_abs_boundary = None
-    plot_support_overlap_heatmap = None
-
 
 def save_run_artifacts(out, save_cfg):
+
     if save_cfg.output_dir is None:
         return
+
     outdir = ensure_dir(save_cfg.output_dir)
     assert outdir is not None
 
@@ -39,7 +27,9 @@ def save_run_artifacts(out, save_cfg):
     if save_cfg.save_history_csv and isinstance(history_df, pd.DataFrame):
         hist_to_save = history_df.copy()
         if "support_idx" in hist_to_save.columns:
-            hist_to_save["support_idx"] = hist_to_save["support_idx"].apply(lambda x: json.dumps(list(map(int, x))))
+            hist_to_save["support_idx"] = hist_to_save["support_idx"].apply(
+                lambda x: json.dumps(list(map(int, x)))
+            )
         hist_to_save.to_csv(os.path.join(outdir, "history.csv"), index=False)
 
     if save_cfg.save_checkpoint_manifest:
@@ -48,7 +38,10 @@ def save_run_artifacts(out, save_cfg):
             meta = payload["meta"].copy()
             meta["support_idx"] = json.dumps(list(map(int, meta["support_idx"])))
             manifest.append(meta)
-        pd.DataFrame(manifest).to_csv(os.path.join(outdir, "checkpoint_manifest.csv"), index=False)
+        pd.DataFrame(manifest).to_csv(
+            os.path.join(outdir, "checkpoint_manifest.csv"),
+            index=False,
+        )
 
     if save_cfg.save_predictions_csv:
         final["var_table"].to_csv(os.path.join(outdir, "variable_table.csv"), index=False)
@@ -58,8 +51,8 @@ def save_run_artifacts(out, save_cfg):
         support_sets = {
             "selected_ckpt_id": int(out["selected_ckpt_id"]),
             "selected_support": list(map(int, final["selected_support"])),
-            "unstable_idx": list(map(int, final["unstable_idx"])),
-            "never_selected_idx": list(map(int, final["never_selected_idx"])),
+            "unstable_idx": list(map(int, final.get("unstable_idx", []))),
+            "never_selected_idx": list(map(int, final.get("never_selected_idx", []))),
         }
         with open(os.path.join(outdir, "support_sets.json"), "w", encoding="utf-8") as f:
             json.dump(support_sets, f, indent=2)
@@ -67,36 +60,22 @@ def save_run_artifacts(out, save_cfg):
     if save_cfg.save_final_json:
         final_json = {
             "selected_ckpt_id": int(out["selected_ckpt_id"]),
-            "runtime_sec": float(out["runtime_sec"]),
-            "stage_summaries": out["stage_summaries"],
+            "runtime_sec": float(out.get("runtime_sec", np.nan)),
+            "stage_summaries": out.get("stage_summaries", []),
             "checkpoint_meta": out["checkpoints"][out["selected_ckpt_id"]]["meta"],
-            "selection_metrics": final["selection_metrics"],
-            "train_metrics": final["train_metrics"],
-            "val_metrics": final["val_metrics"],
-            "test_metrics": final["test_metrics"],
+            "selection_metrics": final.get("selection_metrics", {}),
+            "train_metrics": final.get("train_metrics", {}),
+            "val_metrics": final.get("val_metrics", {}),
+            "test_metrics": final.get("test_metrics", {}),
         }
-        final_json["checkpoint_meta"]["support_idx"] = list(map(int, final_json["checkpoint_meta"]["support_idx"]))
-        with open(os.path.join(outdir, "final_summary.json"), "w", encoding="utf-8") as f:
-            json.dump(final_json, f, indent=2)
 
-    if save_cfg.save_plots:
-        if plot_training_overview is None:
-            raise ImportError("diagplot flow plotting functions are not available.")
-        plot_training_overview(history_df, os.path.join(outdir, "overview_4panel.png"))
-        plot_support_vs_predictive(history_df, os.path.join(outdir, "support_vs_predictive.png"))
-        plot_boundary_density(
-            boundary=final["boundary"],
-            final_support=final["selected_support"],
-            unstable_idx=final["unstable_idx"],
-            never_selected_idx=final["never_selected_idx"],
-            savepath=os.path.join(outdir, "boundary_density.png"),
-        )
-        plot_uncertainty_vs_abs_boundary(
-            boundary=final["boundary"],
-            hard_freq=final["hard_freq"],
-            savepath=os.path.join(outdir, "uncertainty_vs_abs_boundary.png"),
-        )
-        plot_support_overlap_heatmap(history_df, savepath=os.path.join(outdir, "support_overlap_heatmap.png"))
+        if "support_idx" in final_json["checkpoint_meta"]:
+            final_json["checkpoint_meta"]["support_idx"] = list(
+                map(int, final_json["checkpoint_meta"]["support_idx"])
+            )
+
+        with open(os.path.join(outdir, "final_summary.json"), "w", encoding="utf-8") as f:
+            json.dump(final_json, f, cls=NumpyJSONEncoder, ensure_ascii=False, indent=2)
 
 
 def save_flow_run_artifacts(out, save_cfg):
@@ -104,24 +83,57 @@ def save_flow_run_artifacts(out, save_cfg):
 
 
 def save_result_artifacts(result: Mapping[str, Any], save_cfg: SaveConfig) -> None:
+
     if not save_cfg.output_dir:
         return
+
     outdir = Path(save_cfg.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
+
     method = str(result.get("method", "unknown"))
     seed = result.get("seed", "na")
     stem = f"{method}_seed{seed}"
 
     if save_cfg.save_history_csv and isinstance(result.get("history"), pd.DataFrame):
         result["history"].to_csv(outdir / f"{stem}_history.csv", index=False)
+
     if save_cfg.save_predictions_csv:
+        if isinstance(result.get("pred_table"), pd.DataFrame):
+            result["pred_table"].to_csv(outdir / f"{stem}_pred_table.csv", index=False)
+
         yhat = np.asarray(result.get("yhat", []), dtype=float)
         if yhat.size > 0:
-            pd.DataFrame({"yhat": yhat}).to_csv(outdir / f"{stem}_predictions.csv", index=False)
+            pd.DataFrame({"yhat": yhat}).to_csv(
+                outdir / f"{stem}_predictions.csv",
+                index=False,
+            )
+
     if save_cfg.save_var_table_csv and isinstance(result.get("var_table"), pd.DataFrame):
         result["var_table"].to_csv(outdir / f"{stem}_var_table.csv", index=False)
+
+    if save_cfg.save_support_sets_json:
+        selected_support = result.get("selected_support", [])
+        with open(outdir / f"{stem}_selected_support.json", "w", encoding="utf-8") as f:
+            json.dump(list(map(int, selected_support)), f, indent=2)
+
     if save_cfg.save_final_json:
-        json_payload = {k: v for k, v in result.items() if k not in {"history", "pred_table", "var_table", "raw"}}
+        json_payload = {
+            "method": result.get("method"),
+            "seed": result.get("seed"),
+            "runtime_sec": result.get("runtime_sec"),
+            "converged": result.get("converged"),
+            "n_iter": result.get("n_iter"),
+            "support_threshold": result.get("support_threshold"),
+            "beta_eps": result.get("beta_eps"),
+            "sigma2": result.get("sigma2"),
+            "intercept": result.get("intercept"),
+            "selected_support": result.get("selected_support"),
+            "selection_metrics": result.get("selection_metrics"),
+            "predictive_metrics": result.get("predictive_metrics"),
+            "sim_info": result.get("sim_info"),
+            "config": result.get("config"),
+        }
+
         with open(outdir / f"{stem}_summary.json", "w", encoding="utf-8") as f:
             json.dump(json_payload, f, cls=NumpyJSONEncoder, ensure_ascii=False, indent=2)
 
@@ -130,8 +142,119 @@ def save_meanfield_result_artifacts(result: Mapping[str, Any], save_cfg: SaveCon
     return save_result_artifacts(result, save_cfg)
 
 
-def save_benchmark_table(table: pd.DataFrame, save_cfg: SaveConfig, filename: str = "benchmark_table.csv") -> None:
+def save_benchmark_table(
+    table: pd.DataFrame,
+    save_cfg: SaveConfig,
+    filename: str = "benchmark_table.csv",
+) -> None:
     if save_cfg.output_dir and save_cfg.save_benchmark_csv:
         outdir = Path(save_cfg.output_dir)
         outdir.mkdir(parents=True, exist_ok=True)
         table.to_csv(outdir / filename, index=False)
+
+
+def save_result_data(
+    *,
+    results,
+    output_dir: Optional[str] = None,
+    table: Optional[pd.DataFrame] = None,
+    prefix: str = "benchmark",
+    save_cfg: Optional[SaveConfig] = None,
+) -> None:
+    if save_cfg is None:
+        save_cfg = SaveConfig(output_dir=output_dir)
+
+    if output_dir is not None:
+        save_cfg.output_dir = output_dir
+
+    if save_cfg.output_dir is None:
+        return
+
+    outdir = Path(save_cfg.output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(results, Mapping):
+        results = [results]
+    else:
+        results = list(results)
+
+    if table is not None and save_cfg.save_summary_csv:
+        table.to_csv(outdir / f"{prefix}_summary.csv", index=False)
+
+    if save_cfg.save_results_pickle:
+        with open(outdir / f"{prefix}_results.pkl", "wb") as f:
+            pickle.dump(results, f)
+
+    manifest = []
+
+    for i, result in enumerate(results):
+        method = str(result.get("method", "flow"))
+        seed = result.get("seed", "na")
+        stem = f"{prefix}_{method}_seed{seed}_{i}"
+
+        final = result.get("final", {})
+
+        var_table = result.get("var_table", final.get("var_table"))
+        pred_table = result.get("pred_table", final.get("pred_table"))
+        history = result.get("history", result.get("history_df"))
+
+        if save_cfg.save_var_table_csv and isinstance(var_table, pd.DataFrame):
+            var_table.to_csv(outdir / f"{stem}_var_table.csv", index=False)
+
+        if save_cfg.save_predictions_csv and isinstance(pred_table, pd.DataFrame):
+            pred_table.to_csv(outdir / f"{stem}_pred_table.csv", index=False)
+
+        if save_cfg.save_history_csv and isinstance(history, pd.DataFrame):
+            hist = history.copy()
+            if "support_idx" in hist.columns:
+                hist["support_idx"] = hist["support_idx"].apply(
+                    lambda x: json.dumps(list(map(int, x)))
+                )
+            hist.to_csv(outdir / f"{stem}_history.csv", index=False)
+
+        selected_support = result.get("selected_support", final.get("selected_support", []))
+        if save_cfg.save_support_sets_json:
+            with open(outdir / f"{stem}_selected_support.json", "w", encoding="utf-8") as f:
+                json.dump(list(map(int, selected_support)), f, indent=2)
+
+        if save_cfg.save_yhat_csv:
+            yhat = result.get("yhat", final.get("yhat"))
+            if yhat is not None:
+                yhat = np.asarray(yhat, dtype=float)
+                pd.DataFrame({"yhat": yhat}).to_csv(outdir / f"{stem}_yhat.csv", index=False)
+
+        if save_cfg.save_metadata_json:
+            metadata = {
+                "method": method,
+                "seed": seed,
+                "runtime_sec": result.get("runtime_sec"),
+                "converged": result.get("converged"),
+                "n_iter": result.get("n_iter"),
+                "support_threshold": result.get("support_threshold"),
+                "beta_eps": result.get("beta_eps"),
+                "sigma2": result.get("sigma2"),
+                "intercept": result.get("intercept"),
+                "selection_metrics": result.get("selection_metrics", final.get("selection_metrics")),
+                "predictive_metrics": result.get("predictive_metrics", final.get("predictive_metrics")),
+                "train_metrics": final.get("train_metrics"),
+                "val_metrics": final.get("val_metrics"),
+                "test_metrics": final.get("test_metrics"),
+                "sim_info": result.get("sim_info"),
+                "config": result.get("config"),
+                "selected_support": selected_support,
+            }
+
+            with open(outdir / f"{stem}_metadata.json", "w", encoding="utf-8") as f:
+                json.dump(metadata, f, cls=NumpyJSONEncoder, ensure_ascii=False, indent=2)
+
+        manifest.append(
+            {
+                "method": method,
+                "seed": seed,
+                "stem": stem,
+            }
+        )
+
+    if save_cfg.save_manifest_json:
+        with open(outdir / f"{prefix}_manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)

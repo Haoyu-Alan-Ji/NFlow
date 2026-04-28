@@ -7,14 +7,14 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from .config import MeanFieldBenchmarkConfig
-from .meanfield_benchmark_core import _finalize_linear_result
+from .config import BenchmarkConfig
+from .benchmark_tools import _finalize_linear_result
 from .metric import prob_abs_gt_eps
 from .utils import Array, center_response, standardize_design
 
 
 @dataclass
-class MFARDConfig(MeanFieldBenchmarkConfig):
+class MFARDConfig(BenchmarkConfig):
     a0: float = 1e-2
     b0: float = 1e-2
     c0: float = 1e-2
@@ -34,21 +34,72 @@ def _fit_mf_ard(X: Array, y: Array, cfg: MFARDConfig) -> Dict[str, Any]:
     converged = False
 
     for it in range(1, cfg.max_iter + 1):
+        # Coordinate-ascent iteration over all beta_j
+
         max_delta = 0.0
+        # max_delta = max_j |mu_j_new - mu_j_old|
+
         noise_prec = 1.0 / max(sigma2, cfg.min_sigma2)
+        # Noise precision:
+        # sigma^{-2} = 1 / sigma^2
+
         for j in range(p):
+            # Update one coordinate beta_j at a time
+
             old_mu = mu[j]
+            # Store old mean:
+            # mu_j_old
+
             r_j = y - (fitted - X[:, j] * old_mu)
+            # Partial residual excluding predictor j:
+            # r_j = y - sum_{k != j} X_k mu_k
+            #     = y - (X mu - X_j mu_j_old)
+
             s2_j = 1.0 / (noise_prec * x2[j] + tau_mean[j])
+            # Variational posterior variance:
+            # s_j^2 = 1 / (sigma^{-2} X_j^T X_j + E_q[tau_j])
+
             mu_j = s2_j * noise_prec * float(X[:, j] @ r_j)
+            # Variational posterior mean:
+            # mu_j = s_j^2 sigma^{-2} X_j^T r_j
+
             fitted += X[:, j] * (mu_j - old_mu)
+            # Incrementally update fitted value:
+            # X mu_new = X mu_old + X_j (mu_j_new - mu_j_old)
+
             s2[j] = s2_j
+            # Store updated posterior variance:
+            # s_j^2 <- s2_j
+
             mu[j] = mu_j
+            # Store updated posterior mean:
+            # mu_j <- mu_j_new
+
             tau_mean[j] = (cfg.a0 + 0.5) / (cfg.b0 + 0.5 * (mu_j ** 2 + s2_j))
+            # Update ARD local precision expectation:
+            # E_q[tau_j]
+            # = (a0 + 1/2) / (b0 + 1/2 E_q[beta_j^2])
+            # where E_q[beta_j^2] = mu_j^2 + s_j^2
+
             max_delta = max(max_delta, abs(mu_j - old_mu))
+            # Track largest coordinate change:
+            # max_delta = max(max_delta, |mu_j_new - mu_j_old|)
 
         eresid = float(np.sum((y - fitted) ** 2) + np.sum(x2 * s2))
-        sigma2 = max((eresid + 2.0 * cfg.d0) / (n + 2.0 * (cfg.c0 + 1.0)), cfg.min_sigma2)
+        # Expected residual sum of squares:
+        # E_q[||y - X beta||^2]
+        # = ||y - X mu||^2 + sum_j (X_j^T X_j) s_j^2
+
+        sigma2 = max(
+            (eresid + 2.0 * cfg.d0) / (n + 2.0 * (cfg.c0 + 1.0)),
+            cfg.min_sigma2,
+        )
+        # Update noise variance using inverse-gamma posterior mode:
+        # sigma^2
+        # = (E_q[||y - X beta||^2] + 2 d0)
+        #   / (n + 2(c0 + 1))
+        # with lower bound min_sigma2
+        
         hist.append(
             {
                 "iter": float(it),

@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from .config import MeanFieldBenchmarkConfig
-from .meanfield_benchmark_core import _finalize_linear_result
+from .config import BenchmarkConfig
+from .benchmark_tools import _finalize_linear_result
 from .metric import prob_abs_gt_eps
 from .utils import Array, center_response, standardize_design
 
 
 @dataclass
-class MFBayesLassoConfig(MeanFieldBenchmarkConfig):
+class MFBayesLassoConfig(BenchmarkConfig):
     lasso_lambda: float = 1.0
     c0: float = 1e-2
     d0: float = 1e-2

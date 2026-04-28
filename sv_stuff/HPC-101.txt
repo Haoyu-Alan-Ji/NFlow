@@ -1,0 +1,56 @@
+### ================ basics ===================================== ###
+ssh ventz001@login.msi.umn.edu  # login to MSI
+ssh mangi                       # login to mangi from MSI
+ssh ventz001@mangi.msi.umn.edu  # mangi-login, 
+
+
+
+/projects/standard/ventz001     # my home directory
+module avail                    # all available software
+module avail R                  # all available R versions
+module avail julia              # all available versions of a software "julia"
+
+
+### ================ batch script to submit job ================= ###
+### if the requested time/processors/memory are not suitable for the hardware 
+### the job will not be able to run. 
+#!/bin/bash -l
+#SBATCH --time=8:00:00                     # 8h of computing 
+#SBATCH --ntasks=6                         # 6 cores 
+#SBATCH --mem=10g                          # max of 10G memory
+#SBATCH --tmp=10g                          # max 10G of temporary mem available
+#SBATCH --mail-type=ALL                    # send email when job aborts/begins/ends
+#SBATCH --mail-user=sample_email@umn.edu   # email address to be used
+#SBATCH -p small,mygroup                   # select partition (optional)
+
+cd ~/program_directory                     # change directory
+module load intel                          # load software modules
+module load R/4.1.0                        # load software modules
+mpirun -np 8 program < infile > outfile    # start program with MPI communication on 8 cores
+
+
+### ================ submit batch script  ======================= ###
+#== see https://www.msi.umn.edu/partitions for partition names
+sbatch -p partitionname scriptname    # submit job
+squeue -u ventz001                    # view jobs submitted by me 
+scancel jobID                         # cancel my job jobID
+scancel -u ventz001                   # cancel all my jobs
+
+### ================ interactive session  ======================= ###
+# 4h of computing-time on 1 core with 4 (cups)node/core and 1G memory/cup 
+srun -N 1 --ntasks-per-node=4 --mem-per-cpu=1gb -t 3:00:00 -p interactive --pty bash
+srun -N 2 --ntasks-per-node=8 --mem-per-cpu=4gb -t 12:00:00 -p interactive --x11 --pty bash
+srun -N 1 --ntasks-per-node=8 --mem-per-cpu=4gb -t 12:00:00 -p interactive --x11 --pty bash
+
+### ================ interactive session  ======================= ###
+notebooks.msi.umn.edu
+
+
+### ================ interactive RStudio   ======================= ###
+module load rstudio
+rstudio
+
+module unload R
+module load R/2.15.1
+
+
