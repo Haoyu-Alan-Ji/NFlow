@@ -1,0 +1,2 @@
+method,seed,runtime_sec,converged,n_iter,selected_ckpt_id,support_size,precision,recall,f1,auroc,auprc,fdr,tp,fp,fn,tn,train_mse,val_mse,test_mse,train_r2,val_r2,test_r2,train_nll,val_nll,test_nll,n,p,snr,n_active,sigma2,rho,block_size,setting
+flow_stagewise,82,975.4055807590485,True,,111,10.0,1.0,1.0,1.0,1.0,1.0,0.0,10.0,0.0,0.0,90.0,5.610686779022217,5.356552600860596,5.324290752410889,0.7297964572608532,0.7794588869953514,0.6865819571777985,2.2816238403320312,2.259812355041504,2.2570431232452393,1000,100,2.5,10,5.825570876385114,0.8,10,block_corr

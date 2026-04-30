@@ -3,6 +3,13 @@ ssh ventz001@login.msi.umn.edu  # login to MSI
 ssh mangi                       # login to mangi from MSI
 ssh ventz001@mangi.msi.umn.edu  # mangi-login, 
 
+ssh ji000232@login.msi.umn.edu
+srun -N 1 --ntasks-per-node=4 --mem-per-cpu=4gb -t 4:00:00 -p interactive --pty bash
+cd ~/NFlow
+module load python3/3.10.9_anaconda2023.03_libmamba
+source $(conda info --base)/etc/profile.d/conda.sh
+source activate nf311
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 
 /projects/standard/ventz001     # my home directory

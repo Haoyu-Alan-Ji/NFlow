@@ -1,0 +1,27 @@
+{
+  "sim": "block_corr",
+  "n": 1000,
+  "p": 100,
+  "n_active": 10,
+  "active_idx": [
+    6,
+    8,
+    10,
+    22,
+    27,
+    40,
+    49,
+    51,
+    63,
+    90
+  ],
+  "snr": 2.5,
+  "sigma2": 6.896149405858519,
+  "sigma": 2.6260520569589856,
+  "rho": 0.8,
+  "block_size": 10,
+  "beta_low": 0.8,
+  "beta_high": 1.8,
+  "setting": "block_corr",
+  "seed": 97
+}

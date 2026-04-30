@@ -65,12 +65,17 @@ class SaveConfig:
     save_results_pickle: bool = True
     save_metadata_json: bool = True
     save_manifest_json: bool = True
+    save_benchmark_csv: bool = True
 
     # per-result tables
     save_history_csv: bool = True
     save_predictions_csv: bool = True
     save_var_table_csv: bool = True
     save_support_sets_json: bool = True
+
+    # flow-specific outputs
+    save_checkpoint_manifest: bool = False
+    save_final_json: bool = True
 
     # optional large output
     save_yhat_csv: bool = False
