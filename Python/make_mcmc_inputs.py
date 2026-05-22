@@ -12,7 +12,7 @@ if str(NFLOW_ROOT) not in sys.path:
 
 from Python import simfun as sim
 
-OUT_ROOT = Path("data/mcmc_inputs")
+OUT_ROOT = Path("data/hdmcmc_inputs")
 MANIFEST_PATH = Path("data/manifest_mcmc.csv")
 
 # Exactly 20 seeds: 407, ..., 426.
@@ -25,6 +25,20 @@ SETTINGS = ["block_corr", "jitter"]
 DEVICE = torch.device("cpu")
 DTYPE = torch.float32
 
+N = 120
+P = 500
+N_ACTIVE = 10
+SNR = 2.5
+
+TRUE_PROP = N_ACTIVE / P
+BLOCK_SIZE = 10
+JITTER_GROUP_SIZE = P // N_ACTIVE
+
+assert P > N
+assert P % BLOCK_SIZE == 0
+assert P % N_ACTIVE == 0
+
+
 def make_dataset(setting: str, seed: int, device: torch.device, dtype=torch.float32):
     """
     Return X, y, beta_true, sim_info for one setting.
@@ -32,36 +46,36 @@ def make_dataset(setting: str, seed: int, device: torch.device, dtype=torch.floa
 
     if setting == "simple":
         X, y, beta, sim_info = sim.simfun1(
-            n=1000,
-            p=100,
+            n=N,
+            p=P,
             seed=seed,
-            snr=2.5,
-            true_prop=0.1,
+            snr=SNR,
+            true_prop=TRUE_PROP,
             device=device,
             dtype=dtype,
         )
 
     elif setting == "block_corr":
         X, y, beta, sim_info = sim.simfun_block_corr(
-            n=1000,
-            p=100,
+            n=N,
+            p=P,
             seed=seed,
-            snr=2.5,
-            true_prop=0.1,
+            snr=SNR,
+            true_prop=TRUE_PROP,
             rho=0.8,
-            block_size=10,
+            block_size=BLOCK_SIZE,
             device=device,
             dtype=dtype,
         )
 
     elif setting == "jitter":
         X, y, beta, sim_info = sim.simfun_group_competition(
-            n=1000,
-            p=100,
+            n=N,
+            p=P,
             seed=seed,
-            snr=2.5,
-            true_prop=0.1,
-            group_size=10,
+            snr=SNR,
+            true_prop=TRUE_PROP,
+            group_size=JITTER_GROUP_SIZE,
             noise_x=0.15,
             one_active_per_group=True,
             device=device,
@@ -74,6 +88,9 @@ def make_dataset(setting: str, seed: int, device: torch.device, dtype=torch.floa
     sim_info = dict(sim_info)
     sim_info["setting"] = setting
     sim_info["seed"] = seed
+    sim_info["n"] = N
+    sim_info["p"] = P
+    sim_info["n_active_target"] = N_ACTIVE
 
     return X, y, beta, sim_info
 
@@ -98,32 +115,40 @@ def export_one(setting, seed):
     n, p = X.shape
 
     active_idx0 = np.where(np.abs(beta) > 1e-12)[0]
-    active_idx1 = active_idx0 + 1  # R uses 1-based indices.
+    active_idx1 = active_idx0 + 1
 
-    setting_dir = OUT_ROOT / setting
+    if len(active_idx0) == 0:
+        raise ValueError(f"No active variables found for {setting}, seed={seed}")
+
+    setting_dir = OUT_ROOT / f"n{n}_p{p}" / setting
     setting_dir.mkdir(parents=True, exist_ok=True)
 
     data_path = setting_dir / f"seed_{seed}.csv"
+    beta_path = setting_dir / f"seed_{seed}_beta_true.csv"
 
     df = pd.DataFrame(X, columns=[f"x{j + 1}" for j in range(p)])
     df.insert(0, "y", y)
     df.to_csv(data_path, index=False)
 
-    nonzero_beta = beta[active_idx0]
-    if len(nonzero_beta) == 0:
-        raise ValueError(f"No active variables found for {setting}, seed={seed}")
+    pd.DataFrame({
+        "variable": [f"x{j + 1}" for j in range(p)],
+        "beta_true": beta,
+        "active": (np.abs(beta) > 1e-12).astype(int),
+    }).to_csv(beta_path, index=False)
 
-    # Your current R run.R reconstructs b0 using active_idx and beta_value.
-    # If nonzero beta values are not identical, this value is only used as
-    # an initialization proxy. The MCMC target uses X and y.
+    nonzero_beta = beta[active_idx0]
     beta_value = float(np.mean(nonzero_beta))
 
-    out_dir = Path("outputs_mcmc") / setting / f"seed_{seed}"
+    out_dir = Path("outputs_mcmc") / f"n{n}_p{p}" / setting / f"seed_{seed}"
 
     row = {
         "setting": setting,
         "seed": seed,
+        "n": n,
+        "p": p,
+        "n_active": len(active_idx0),
         "data_path": data_path.as_posix(),
+        "beta_path": beta_path.as_posix(),
         "out_dir": out_dir.as_posix(),
         "active_idx": ";".join(str(j) for j in active_idx1),
         "beta_value": beta_value,
