@@ -24,7 +24,7 @@ def simfun1(n=180, p=100, seed=123, snr=3.0, true_prop=0.1, device=None, dtype=t
     beta_true[active_idx] = signs * magnitudes
 
     signal = X @ beta_true
-    sigma2 = np.var(signal) / snr
+    sigma2 = 1.0
     sigma = np.sqrt(sigma2)
 
     y = signal + sigma * rng.standard_normal(n).astype(np.float32)
@@ -208,7 +208,7 @@ def simfun_block_corr(
     signal = X_np @ beta_np
     signal_var = float(np.var(signal, ddof=0))
 
-    sigma2 = signal_var / float(snr)
+    sigma2 = 1.0
     sigma = float(np.sqrt(sigma2))
 
     eps = rng.normal(loc=0.0, scale=sigma, size=n)
@@ -388,7 +388,7 @@ def simfun_group_competition(
     signal = X_np @ beta_np
     signal_var = float(np.var(signal, ddof=0))
 
-    sigma2 = signal_var / float(snr)
+    sigma2 = 1.0
     sigma = float(np.sqrt(sigma2))
 
     eps = rng.normal(loc=0.0, scale=sigma, size=n)

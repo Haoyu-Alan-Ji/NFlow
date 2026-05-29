@@ -3,6 +3,11 @@ import sys
 import numpy as np
 import pandas as pd
 import torch
+import os
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 # Make sure this points to the repo root where test/HPC_benchmark.py exists.
 # If this script is already run from repo root, this is enough.
