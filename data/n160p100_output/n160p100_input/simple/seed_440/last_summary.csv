@@ -1,0 +1,2 @@
+method,setting,seed,replicate_id,n,p,n_active,sigma2,support_threshold,selected_size,active_idx0,selected_idx0,selected_ckpt_id,precision,recall,f1,fdr,tp,fp,fn,tn,support_size,auroc,auprc
+last_flow,simple,440,440,160,100,10,1.0,0.5,7,4;16;31;33;58;59;61;67;80;90,4;16;31;33;58;80;90,195,1.0,0.7,0.8235294117647058,0.0,7,0,3,90,7,0.85,0.7417383512544803

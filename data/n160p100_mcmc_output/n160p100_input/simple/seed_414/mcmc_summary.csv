@@ -1,0 +1,2 @@
+"method","setting","seed","replicate_id","n","p","n_train","n_val","n_test","n_active","sigma2","split_seed","burnin","thin","n_kept","beta_eps","pip_threshold","mean_support_size","mean_pip","selected_size","active_idx0","selected_idx0","precision","recall","f1","fdr","tp","fp","fn","tn","support_size","auroc","auprc"
+"mcmc","simple",414,414,160,100,96,32,32,10,1,12345,2000,1,8000,0.5,0.5,9.425375,0.09425375,9,"4;8;17;24;30;38;64;65;78;82","8;17;24;30;38;64;65;78;82",1,0.9,0.947368421052632,0,9,0,1,90,9,1,1

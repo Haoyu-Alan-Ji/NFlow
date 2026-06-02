@@ -41,6 +41,7 @@ from .metric import (
 
 from .artifact import save_run_artifacts
 
+from .simfun import print_siminfo
 
 def evaluate_checkpoint(
     model,
@@ -515,7 +516,7 @@ def simflow_stagewise(X, y, beta_true=None, sim_info=None, build_flow_vi=build_f
 
     if show_start:
         print("===== Simulation info =====")
-        print(sim_info)
+        print(print_siminfo(sim_info))
 
     split_indices = make_split(X.shape[0], split_cfg)
     splits = split_data(X, y, split_indices, mode="tensor")

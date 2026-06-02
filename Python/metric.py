@@ -243,7 +243,7 @@ def flow_row_from_result(out_flow):
     from .metric import ranking_metrics
 
     final = out_flow["final"]
-    sim_info = out_flow.get("sim_info", {})
+    sim_info = out_flow.get("sim_info", {}) or {}
 
     selection = dict(final.get("selection_metrics", {}))
 
@@ -311,18 +311,30 @@ def flow_row_from_result(out_flow):
         "test_nll": test_metrics.get("nll"),
     }
 
-    for key in [
+    sim_keys = [
+        "sim",
+        "setting",
         "n",
         "p",
-        "snr",
-        "true_prop",
         "n_active",
+        "n_active_target",
         "sigma2",
+        "sigma",
+        "signal_var",
+        "outcome_var",
+        "snr_actual",
+        "center_y",
         "rho",
         "noise_x",
         "block_size",
         "group_size",
-    ]:
+        "n_groups",
+        "one_active_per_group",
+        "beta_low",
+        "beta_high",
+    ]
+
+    for key in sim_keys:
         if key in sim_info:
             row[key] = sim_info[key]
 

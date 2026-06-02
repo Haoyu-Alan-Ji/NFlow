@@ -4,266 +4,42 @@ from typing import Any, Dict, Mapping
 
 import numpy as np
 import torch
-from .utils import as_numpy_1d, as_numpy_2d
 
-
-def simfun1(n=180, p=100, seed=123, snr=3.0, true_prop=0.1, device=None, dtype=torch.float32,):
-
-    rng = np.random.default_rng(seed)
-    torch.manual_seed(seed)
-
-    X = rng.standard_normal((n, p)).astype(np.float32)
-    X = (X - X.mean(axis=0, keepdims=True)) / (X.std(axis=0, keepdims=True) + 1e-8)
-
-    n_active = int(p * true_prop)
-    active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
-
-    beta_true = np.zeros(p, dtype=np.float32)
-    magnitudes = rng.uniform(0.3, 2.0, size=n_active).astype(np.float32)
-    signs = rng.choice([-1.0, 1.0], size=n_active).astype(np.float32)
-    beta_true[active_idx] = signs * magnitudes
-
-    signal = X @ beta_true
-    sigma2 = 1.0
-    sigma = np.sqrt(sigma2)
-
-    y = signal + sigma * rng.standard_normal(n).astype(np.float32)
-    y = y - y.mean()
-
-    X_t = torch.tensor(X, dtype=dtype, device=device)
-    y_t = torch.tensor(y, dtype=dtype, device=device)
-    beta_true_t = torch.tensor(beta_true, dtype=dtype, device=device)
-
-    info = {"n": n, "p": p, "n_active": n_active, "sigma2": float(sigma2), "sigma": float(sigma), "active_idx": active_idx, "snr": snr,}
-
-    return X_t, y_t, beta_true_t, info
-
-def extract_sim_arrays(sim: Any) -> Dict[str, Any]:
-    """Extract X, y, beta_true, active_idx, and sim_info from a simulation payload."""
-    if isinstance(sim, (tuple, list)):
-        if len(sim) < 3:
-            raise ValueError("Tuple/list simulation payload must contain at least (X, y, beta_true).")
-        X, y, beta_true = sim[:3]
-        beta_true = as_numpy_1d(beta_true)
-        return {
-            "X": as_numpy_2d(X),
-            "y": as_numpy_1d(y),
-            "beta_true": beta_true,
-            "active_idx": np.flatnonzero(beta_true != 0.0),
-            "sim_info": {},
-        }
-
-    if isinstance(sim, Mapping):
-        keys = {str(k).lower(): k for k in sim.keys()}
-        X_key = keys.get("x")
-        y_key = keys.get("y")
-        if X_key is None or y_key is None:
-            raise ValueError("Simulation payload must contain X and y.")
-
-        X = as_numpy_2d(sim[X_key])
-        y = as_numpy_1d(sim[y_key])
-
-        beta_true = None
-        for candidate in ["beta_true", "beta", "beta0", "b_true"]:
-            if candidate in keys:
-                beta_true = as_numpy_1d(sim[keys[candidate]])
-                break
-
-        active_idx = None
-        for candidate in ["active_idx", "support", "truth_idx", "nonzero_idx"]:
-            if candidate in keys:
-                active_idx = np.asarray(sim[keys[candidate]], dtype=int)
-                break
-
-        if beta_true is None and active_idx is not None:
-            beta_true = np.zeros(X.shape[1], dtype=float)
-            beta_true[active_idx] = 1.0
-        if beta_true is not None and active_idx is None:
-            active_idx = np.flatnonzero(beta_true != 0.0)
-
-        sim_info = {k: v for k, v in sim.items() if k not in {X_key, y_key}}
-        return {
-            "X": X,
-            "y": y,
-            "beta_true": beta_true,
-            "active_idx": active_idx,
-            "sim_info": sim_info,
-        }
-
-    raise TypeError(f"Unsupported simulation payload type: {type(sim)}")
-
-
-def simfun_block_corr(
+def simfun1(
+    sim="simple",
     n=180,
     p=100,
     seed=123,
-    snr=2.5,
-    true_prop=0.1,
+    n_active=10,
+    sigma2=1.0,
+    beta_low=0.3,
+    beta_high=2.0,
     rho=0.8,
     block_size=10,
-    beta_low=0.8,
-    beta_high=1.8,
-    device=None,
-    dtype=None,
-):
-    """
-    Block-correlated sparse linear regression simulation.
-
-    Data-generating model:
-        y = X beta + eps
-
-    X has block-wise AR(1) correlation:
-        Corr(X_j, X_k) = rho ** |j-k| within each block.
-
-    Parameters
-    ----------
-    n : int
-        Number of observations.
-
-    p : int
-        Number of predictors.
-
-    seed : int
-        Random seed.
-
-    snr : float
-        Signal-to-noise ratio:
-            snr = Var(X beta) / sigma^2
-
-    true_prop : float
-        Proportion of active variables.
-
-    rho : float
-        Within-block AR(1) correlation.
-
-    block_size : int
-        Number of variables per block.
-
-    beta_low, beta_high : float
-        Active coefficient magnitudes are sampled uniformly from
-        [beta_low, beta_high], with random signs.
-
-    device, dtype:
-        Torch device and dtype.
-
-    Returns
-    -------
-    X : torch.Tensor, shape (n, p)
-    y : torch.Tensor, shape (n,)
-    beta_true : torch.Tensor, shape (p,)
-    info : dict
-    """
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if dtype is None:
-        dtype = torch.float32
-
-    rng = np.random.default_rng(seed)
-
-    n_active = int(round(p * true_prop))
-    n_active = max(1, min(n_active, p))
-
-    # ----------------------------
-    # Build block-correlated X
-    # ----------------------------
-    blocks = []
-    remaining = p
-
-    while remaining > 0:
-        b = min(block_size, remaining)
-
-        idx = np.arange(b)
-        Sigma = rho ** np.abs(idx[:, None] - idx[None, :])
-
-        X_block = rng.multivariate_normal(
-            mean=np.zeros(b),
-            cov=Sigma,
-            size=n,
-        )
-
-        blocks.append(X_block)
-        remaining -= b
-
-    X_np = np.concatenate(blocks, axis=1)
-
-    # Standardize columns at the data-generation level.
-    X_np = X_np - X_np.mean(axis=0, keepdims=True)
-    X_np = X_np / (X_np.std(axis=0, ddof=0, keepdims=True) + 1e-12)
-
-    # ----------------------------
-    # Sparse beta
-    # ----------------------------
-    active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
-
-    beta_np = np.zeros(p, dtype=float)
-    signs = rng.choice([-1.0, 1.0], size=n_active)
-    mags = rng.uniform(beta_low, beta_high, size=n_active)
-    beta_np[active_idx] = signs * mags
-
-    # ----------------------------
-    # Generate y with target SNR
-    # ----------------------------
-    signal = X_np @ beta_np
-    signal_var = float(np.var(signal, ddof=0))
-
-    sigma2 = 1.0
-    sigma = float(np.sqrt(sigma2))
-
-    eps = rng.normal(loc=0.0, scale=sigma, size=n)
-    y_np = signal + eps
-
-    # Center y at generation level only if you want.
-    # I leave it uncentered because your workflow already handles center_y.
-    # y_np = y_np - y_np.mean()
-
-    X = torch.as_tensor(X_np, dtype=dtype, device=device)
-    y = torch.as_tensor(y_np, dtype=dtype, device=device)
-    beta_true = torch.as_tensor(beta_np, dtype=dtype, device=device)
-
-    info = {
-        "sim": "block_corr",
-        "n": n,
-        "p": p,
-        "n_active": n_active,
-        "active_idx": active_idx,
-        "snr": float(snr),
-        "sigma2": float(sigma2),
-        "sigma": float(sigma),
-        "rho": float(rho),
-        "block_size": int(block_size),
-        "beta_low": float(beta_low),
-        "beta_high": float(beta_high),
-    }
-
-    return X, y, beta_true, info
-
-def simfun_group_competition(
-    n=180,
-    p=100,
-    seed=123,
-    snr=2.5,
-    true_prop=0.1,
     group_size=10,
     noise_x=0.15,
-    beta_low=0.8,
-    beta_high=1.8,
     one_active_per_group=True,
+    center_y=True,
     device=None,
-    dtype=None,
+    dtype=torch.float32,
 ):
     """
-    Group-competition sparse linear regression simulation.
+    Unified sparse linear regression simulation.
 
     Data-generating model:
-        y = X beta + eps
+        y = X beta + eps,
+        eps ~ N(0, sigma2).
 
-    Within each group:
-        X_{g,j} = z_g + noise_x * eta_{g,j}
+    Available simulation settings:
+        sim = "simple"
+            Independent standardized Gaussian predictors.
 
-    When noise_x is small, variables inside the same group are nearly
-    exchangeable. This creates support ambiguity and one-of-K competition.
+        sim = "block_corr"
+            Block-wise AR(1) correlated predictors.
+
+        sim = "group_competition"
+            Within-group near-duplicate predictors, creating
+            one-of-K variable-selection ambiguity.
 
     Parameters
     ----------
@@ -276,28 +52,37 @@ def simfun_group_competition(
     seed : int
         Random seed.
 
-    snr : float
-        Signal-to-noise ratio:
-            snr = Var(X beta) / sigma^2
+    n_active : int
+        Number of truly active variables.
 
-    true_prop : float
-        Proportion of active variables.
-
-    group_size : int
-        Number of variables per group.
-
-    noise_x : float
-        Within-group idiosyncratic noise level.
-        Smaller values create stronger competition.
+    sigma2 : float
+        Noise variance.
 
     beta_low, beta_high : float
         Active coefficient magnitudes are sampled uniformly from
         [beta_low, beta_high], with random signs.
 
-    one_active_per_group : bool
-        If True, active variables are chosen from distinct groups whenever possible.
+    rho : float
+        Within-block AR(1) correlation for sim="block_corr".
 
-    device, dtype:
+    block_size : int
+        Block size for sim="block_corr".
+
+    group_size : int
+        Group size for sim="group_competition".
+
+    noise_x : float
+        Within-group idiosyncratic noise level for sim="group_competition".
+        Smaller values create stronger within-group competition.
+
+    one_active_per_group : bool
+        If True, active variables are chosen from distinct groups whenever possible
+        for sim="group_competition".
+
+    center_y : bool
+        If True, center y by subtracting its sample mean.
+
+    device, dtype :
         Torch device and dtype.
 
     Returns
@@ -309,48 +94,86 @@ def simfun_group_competition(
     """
 
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if dtype is None:
-        dtype = torch.float32
+        device = torch.device("cpu")
 
     rng = np.random.default_rng(seed)
 
-    n_active = int(round(p * true_prop))
-    n_active = max(1, min(n_active, p))
+    if n_active > p:
+        raise ValueError("n_active cannot be larger than p.")
 
-    # ----------------------------
-    # Construct group structure
-    # ----------------------------
-    n_groups = int(np.ceil(p / group_size))
+    if sigma2 <= 0:
+        raise ValueError("sigma2 must be positive.")
 
-    groups = []
-    start = 0
-    for g in range(n_groups):
-        end = min(start + group_size, p)
-        groups.append(np.arange(start, end))
-        start = end
+    if beta_low <= 0 or beta_high <= 0 or beta_low > beta_high:
+        raise ValueError("Require 0 < beta_low <= beta_high.")
 
-    # ----------------------------
-    # Build group-competition X
-    # ----------------------------
-    X_np = np.zeros((n, p), dtype=float)
+    # --------------------------------------------------
+    # 1. Generate design matrix X
+    # --------------------------------------------------
+    if sim == "simple":
+        X_np = rng.standard_normal((n, p)).astype(np.float32)
 
-    for g, cols in enumerate(groups):
-        z_g = rng.normal(loc=0.0, scale=1.0, size=(n, 1))
-        eta_g = rng.normal(loc=0.0, scale=1.0, size=(n, len(cols)))
+    elif sim == "block_corr":
+        blocks = []
+        remaining = p
 
-        X_np[:, cols] = z_g + noise_x * eta_g
+        while remaining > 0:
+            b = min(block_size, remaining)
 
-    # Standardize columns at the data-generation level.
+            idx = np.arange(b)
+            Sigma = rho ** np.abs(idx[:, None] - idx[None, :])
+
+            X_block = rng.multivariate_normal(
+                mean=np.zeros(b),
+                cov=Sigma,
+                size=n,
+            )
+
+            blocks.append(X_block)
+            remaining -= b
+
+        X_np = np.concatenate(blocks, axis=1).astype(np.float32)
+
+    elif sim == "group_competition":
+        n_groups = int(np.ceil(p / group_size))
+
+        groups = []
+        start = 0
+        for g in range(n_groups):
+            end = min(start + group_size, p)
+            groups.append(np.arange(start, end))
+            start = end
+
+        X_np = np.zeros((n, p), dtype=np.float32)
+
+        for g, cols in enumerate(groups):
+            z_g = rng.normal(loc=0.0, scale=1.0, size=(n, 1))
+            eta_g = rng.normal(loc=0.0, scale=1.0, size=(n, len(cols)))
+
+            X_np[:, cols] = z_g + noise_x * eta_g
+
+    else:
+        raise ValueError(
+            "Unknown sim. Use one of: 'simple', 'block_corr', 'group_competition'."
+        )
+
+    # Standardize columns.
     X_np = X_np - X_np.mean(axis=0, keepdims=True)
     X_np = X_np / (X_np.std(axis=0, ddof=0, keepdims=True) + 1e-12)
 
-    # ----------------------------
-    # Choose active variables
-    # ----------------------------
-    if one_active_per_group:
-        # Choose active groups first.
+    # --------------------------------------------------
+    # 2. Choose active variables
+    # --------------------------------------------------
+    if sim == "group_competition" and one_active_per_group:
+        n_groups = int(np.ceil(p / group_size))
+
+        groups = []
+        start = 0
+        for g in range(n_groups):
+            end = min(start + group_size, p)
+            groups.append(np.arange(start, end))
+            start = end
+
         n_active_groups = min(n_active, n_groups)
         active_groups = rng.choice(n_groups, size=n_active_groups, replace=False)
 
@@ -359,7 +182,6 @@ def simfun_group_competition(
             cols = groups[g]
             active_list.append(rng.choice(cols))
 
-        # If n_active > n_groups, fill remaining active variables randomly.
         if n_active > n_active_groups:
             remaining_candidates = np.setdiff1d(
                 np.arange(p),
@@ -377,51 +199,174 @@ def simfun_group_competition(
     else:
         active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
 
-    beta_np = np.zeros(p, dtype=float)
-    signs = rng.choice([-1.0, 1.0], size=len(active_idx))
-    mags = rng.uniform(beta_low, beta_high, size=len(active_idx))
+    # --------------------------------------------------
+    # 3. Generate sparse beta
+    # --------------------------------------------------
+    beta_np = np.zeros(p, dtype=np.float32)
+
+    signs = rng.choice([-1.0, 1.0], size=len(active_idx)).astype(np.float32)
+    mags = rng.uniform(beta_low, beta_high, size=len(active_idx)).astype(np.float32)
+
     beta_np[active_idx] = signs * mags
 
-    # ----------------------------
-    # Generate y with target SNR
-    # ----------------------------
+    # Active variables sorted by decreasing absolute true effect size.
+    active_order = active_idx[np.argsort(-np.abs(beta_np[active_idx]))]
+
+    active_table = [
+        {
+            "rank": int(r + 1),
+            "j": int(j),                 # zero-based index
+            "j1": int(j + 1),             # one-based index, useful for R/output
+            "beta_true": float(beta_np[j]),
+            "abs_beta_true": float(abs(beta_np[j])),
+        }
+        for r, j in enumerate(active_order)
+    ]
+
+    # --------------------------------------------------
+    # 4. Generate y
+    # --------------------------------------------------
     signal = X_np @ beta_np
-    signal_var = float(np.var(signal, ddof=0))
 
-    sigma2 = 1.0
     sigma = float(np.sqrt(sigma2))
+    eps = sigma * rng.standard_normal(n).astype(np.float32)
 
-    eps = rng.normal(loc=0.0, scale=sigma, size=n)
     y_np = signal + eps
 
+    if center_y:
+        y_np = y_np - y_np.mean()
+
+    # --------------------------------------------------
+    # 5. Diagnostics
+    # --------------------------------------------------
+    signal_var = float(np.var(signal, ddof=0))
+    outcome_var = float(np.var(y_np, ddof=0))
+    snr_actual = signal_var / float(sigma2)
+
+    # --------------------------------------------------
+    # 6. Convert to torch tensors
+    # --------------------------------------------------
     X = torch.as_tensor(X_np, dtype=dtype, device=device)
     y = torch.as_tensor(y_np, dtype=dtype, device=device)
     beta_true = torch.as_tensor(beta_np, dtype=dtype, device=device)
 
-    # Group id for each variable.
-    group_id = np.empty(p, dtype=int)
-    for g, cols in enumerate(groups):
-        group_id[cols] = g
-
-    active_groups = np.unique(group_id[active_idx])
-
+    # --------------------------------------------------
+    # 7. Info dictionary
+    # --------------------------------------------------
     info = {
-        "sim": "group_competition",
-        "n": n,
-        "p": p,
-        "n_active": len(active_idx),
+        "sim": sim,
+        "n": int(n),
+        "p": int(p),
+        "n_active": int(len(active_idx)),
+
+        # Original active set, zero-based.
         "active_idx": active_idx,
-        "snr": float(snr),
+
+        # Active variables sorted by |beta_true|, zero-based.
+        "active_idx_by_abs": active_order,
+
+        # A cleaner table with rank, index, and true coefficient.
+        "active_table": active_table,
+
         "sigma2": float(sigma2),
         "sigma": float(sigma),
-        "group_size": int(group_size),
-        "n_groups": int(n_groups),
-        "noise_x": float(noise_x),
-        "one_active_per_group": bool(one_active_per_group),
-        "group_id": group_id,
-        "active_groups": active_groups,
+        "signal_var": signal_var,
+        "outcome_var": outcome_var,
+        "snr_actual": float(snr_actual),
         "beta_low": float(beta_low),
         "beta_high": float(beta_high),
+        "center_y": bool(center_y),
     }
 
+    if sim == "block_corr":
+        info.update({
+            "rho": float(rho),
+            "block_size": int(block_size),
+        })
+
+    if sim == "group_competition":
+        group_id = np.empty(p, dtype=int)
+        for g, cols in enumerate(groups):
+            group_id[cols] = g
+
+        active_groups = np.unique(group_id[active_idx])
+
+        info.update({
+            "group_size": int(group_size),
+            "n_groups": int(len(groups)),
+            "noise_x": float(noise_x),
+            "one_active_per_group": bool(one_active_per_group),
+            "group_id": group_id,
+            "active_groups": active_groups,
+        })
+
     return X, y, beta_true, info
+
+
+def print_siminfo(sim_info, digits=4):
+    """
+    Format simulation information in a readable multi-line style.
+    """
+    if sim_info is None:
+        return "sim_info = None"
+
+    lines = []
+
+    # Basic scalar fields.
+    scalar_keys = [
+        "sim",
+        "setting",
+        "seed",
+        "n",
+        "p",
+        "n_active",
+        "sigma2",
+        "sigma",
+        "signal_var",
+        "outcome_var",
+        "snr_actual",
+        "beta_low",
+        "beta_high",
+        "center_y",
+        "rho",
+        "block_size",
+        "group_size",
+        "n_groups",
+        "noise_x",
+        "one_active_per_group",
+    ]
+
+    lines.append("Simulation summary:")
+    for key in scalar_keys:
+        if key in sim_info:
+            val = sim_info[key]
+            if isinstance(val, float):
+                lines.append(f"  {key:<22}: {val:.{digits}f}")
+            else:
+                lines.append(f"  {key:<22}: {val}")
+
+    # Original active indices.
+    if "active_idx" in sim_info:
+        active_idx = sim_info["active_idx"]
+        if hasattr(active_idx, "tolist"):
+            active_idx = active_idx.tolist()
+        lines.append("")
+        lines.append("Active indices, zero-based:")
+        lines.append(f"  {active_idx}")
+
+    # Sorted active table.
+    if "active_table" in sim_info:
+        lines.append("")
+        lines.append("Active variables sorted by |beta_true|:")
+        lines.append(f"  {'rank':>4} {'j':>5} {'j1':>5} {'beta_true':>12} {'|beta|':>12}")
+
+        for row in sim_info["active_table"]:
+            lines.append(
+                f"  {row['rank']:>4d} "
+                f"{row['j']:>5d} "
+                f"{row['j1']:>5d} "
+                f"{row['beta_true']:>12.{digits}f} "
+                f"{row['abs_beta_true']:>12.{digits}f}"
+            )
+
+    return "\n".join(lines)
