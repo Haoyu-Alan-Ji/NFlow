@@ -1,11 +1,12 @@
 from __future__ import annotations
-
+import pandas as pd
+import torch
 import json
 import math
 import os
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Tuple
-
+from pathlib import Path
 import numpy as np
 
 Array = np.ndarray
@@ -28,6 +29,19 @@ def safe_float(x: Any) -> float:
         return float(x.detach().cpu().item())
     return float(x)
 
+def read_mcmc_ref(mcmc_root, mcmc_seed, setting="simple"):
+    d = Path(mcmc_root) / setting / f"seed_{int(mcmc_seed)}"
+
+    beta = pd.read_csv(d / "mcmc_beta_draws.csv.gz")
+    if "draw_id" in beta.columns:
+        beta = beta.drop(columns=["draw_id"])
+
+    pip = pd.read_csv(d / "mcmc_pip.csv").sort_values("j0")
+
+    return {
+        "beta": beta.to_numpy(dtype=float),
+        "pip": pip["pip"].to_numpy(dtype=float),
+    }
 
 class EMA:
     def __init__(self, beta: float = 0.9):
@@ -87,6 +101,12 @@ def jaccard_distance(a, b) -> float:
 def jaccard_similarity(a, b) -> float:
     return 1.0 - jaccard_distance(a, b)
 
+def softgate_from_draws(draws, tau):
+    u = draws["u"]
+    t = draws["t"]
+    if t.ndim == 1:
+        t = t[:, None]
+    return torch.sigmoid((u - t) / float(tau))
 
 def rolling_stage_taus(tau_start: float, tau_end: float, n_stages: int):
     ratio = (tau_end / tau_start) ** (1.0 / n_stages)

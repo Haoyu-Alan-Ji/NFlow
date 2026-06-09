@@ -46,6 +46,9 @@ class StagewiseAnnealConfig:
     retry_shrink_power: float = 0.5
     max_retries_per_drop: int = 2
     history_round_digits: int = 8
+    q_entropy_weight: float = 0.0
+    recovery_min_epoch: int = 100
+    recovery_score_col: str = "moment_recovery_score"
 
 
 @dataclass

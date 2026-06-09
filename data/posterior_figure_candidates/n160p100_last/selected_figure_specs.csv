@@ -1,0 +1,14 @@
+figure,config_id,seed,j0,k0,j1,k1,score_name,score,joint_skl,corr_absdiff,beta_skl,mean_zerr,sd_logerr,softgate_absdiff,softgate_last,pip_mcmc,pip_last,truth,group
+fig1_true_active_joint_density,default,429,93,5,94,6,pair_score,0.1742777460556844,0.05850130991569935,0.09302042202362529,,,,,,,,,
+fig2_true_active_marginal_density,default,442,68,,69,,moment_score,0.030514744659547215,,,0.009688266252699076,0.0011580544367007061,0.02935669022284651,,,,,,
+fig3_true_zero_beta_density,default,436,79,,80,,zero_beta_score,0.0205559607545152,,,,,,0.012158738358040804,,,,,
+fig4_softgate_recovery_true_nonzero,default,426,68,,69,,softgate_absdiff,0.0010613948424998965,,,,,,,0.9989386051575001,1.0,1.0,1.0,true_nonzero
+fig4_softgate_recovery_true_nonzero,default,458,72,,73,,softgate_absdiff,0.0012688259824999992,,,,,,,0.9987311740175,1.0,1.0,1.0,true_nonzero
+fig4_softgate_recovery_true_nonzero,default,460,43,,44,,softgate_absdiff,0.0013746624349999514,,,,,,,0.998625337565,1.0,0.99975,1.0,true_nonzero
+fig4_softgate_recovery_true_nonzero,default,462,38,,39,,softgate_absdiff,0.001544824469999928,,,,,,,0.9984551755300001,1.0,1.0,1.0,true_nonzero
+fig4_softgate_recovery_true_nonzero,default,417,30,,31,,softgate_absdiff,0.0016069830650000672,,,,,,,0.9983930169349999,1.0,1.0,1.0,true_nonzero
+fig4_softgate_recovery_true_zero,default,438,79,,80,,softgate_absdiff,0.00304865761525,,,,,,,0.04557634238475,0.048625,0.0,0.0,true_zero
+fig4_softgate_recovery_true_zero,default,493,25,,26,,softgate_absdiff,0.003625076443250011,,,,,,,0.09375007644325001,0.090125,0.0,0.0,true_zero
+fig4_softgate_recovery_true_zero,default,483,77,,78,,softgate_absdiff,0.006598928839961899,,,,,,,0.0152239288399619,0.008625,0.0,0.0,true_zero
+fig4_softgate_recovery_true_zero,default,403,6,,7,,softgate_absdiff,0.007344203138675003,,,,,,,0.039594203138675,0.03225,0.0,0.0,true_zero
+fig4_softgate_recovery_true_zero,default,424,85,,86,,softgate_absdiff,0.00901415318196251,,,,,,,0.00913915318196251,0.000125,0.00175,0.0,true_zero

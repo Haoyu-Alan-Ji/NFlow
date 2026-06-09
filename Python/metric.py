@@ -6,7 +6,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 import numpy as np
 import pandas as pd
 from .utils import Array, to_numpy
-
+from scipy.stats import gaussian_kde
 
 def _torch():
     import torch
@@ -499,3 +499,155 @@ def prob_abs_gt_eps(mu, sd, eps: float):
     upper = 1.0 - normal_cdf((eps - mu) / sd_safe)
     lower = normal_cdf((-eps - mu) / sd_safe)
     return np.clip(upper + lower, 0.0, 1.0)
+
+
+def symmetric_kl_grid(p, q, eps=1e-12):
+    p = np.maximum(p, eps)
+    q = np.maximum(q, eps)
+    p = p / p.sum()
+    q = q / q.sum()
+    return float(0.5 * (np.sum(p * np.log(p / q)) + np.sum(q * np.log(q / p))))
+
+
+def kde_skl_1d(x, y, n_grid=128):
+    lo = min(np.quantile(x, 0.001), np.quantile(y, 0.001))
+    hi = max(np.quantile(x, 0.999), np.quantile(y, 0.999))
+    pad = 0.1 * (hi - lo + 1e-8)
+
+    grid = np.linspace(lo - pad, hi + pad, n_grid)
+
+    p = gaussian_kde(x)(grid)
+    q = gaussian_kde(y)(grid)
+
+    return symmetric_kl_grid(p, q)
+
+
+def kde_skl_2d(X, Y, n_grid=35):
+    xlo = min(np.quantile(X[:, 0], 0.001), np.quantile(Y[:, 0], 0.001))
+    xhi = max(np.quantile(X[:, 0], 0.999), np.quantile(Y[:, 0], 0.999))
+    ylo = min(np.quantile(X[:, 1], 0.001), np.quantile(Y[:, 1], 0.001))
+    yhi = max(np.quantile(X[:, 1], 0.999), np.quantile(Y[:, 1], 0.999))
+
+    xpad = 0.1 * (xhi - xlo + 1e-8)
+    ypad = 0.1 * (yhi - ylo + 1e-8)
+
+    gx = np.linspace(xlo - xpad, xhi + xpad, n_grid)
+    gy = np.linspace(ylo - ypad, yhi + ypad, n_grid)
+
+    xx, yy = np.meshgrid(gx, gy)
+    pts = np.vstack([xx.ravel(), yy.ravel()])
+
+    p = gaussian_kde(X.T)(pts)
+    q = gaussian_kde(Y.T)(pts)
+
+    return symmetric_kl_grid(p, q)
+
+
+def active_pairs(beta_true_np, max_pairs=10):
+    idx = np.where(np.abs(beta_true_np) > 1e-12)[0]
+    idx = idx[np.argsort(-np.abs(beta_true_np[idx]))]
+
+    out = []
+    for a in range(len(idx)):
+        for b in range(a + 1, len(idx)):
+            out.append((int(idx[a]), int(idx[b])))
+
+    return out[:max_pairs]
+
+
+def recovery_metrics(beta_last, gate_last, beta_true, mcmc_ref):
+    beta_mcmc = mcmc_ref["beta"]
+    pip_mcmc = mcmc_ref["pip"]
+
+    beta_true_np = to_numpy(beta_true)
+    active_idx = np.where(np.abs(beta_true_np) > 1e-12)[0]
+    zero_idx = np.where(np.abs(beta_true_np) <= 1e-12)[0]
+
+    eps = 1e-8
+
+    mean_last = beta_last.mean(axis=0)
+    mean_mcmc = beta_mcmc.mean(axis=0)
+
+    sd_last = beta_last.std(axis=0, ddof=1)
+    sd_mcmc = beta_mcmc.std(axis=0, ddof=1)
+
+    active_mean_zerr = np.abs(
+        (mean_last[active_idx] - mean_mcmc[active_idx])
+        / (sd_mcmc[active_idx] + eps)
+    )
+
+    active_sd_logerr = np.abs(
+        np.log((sd_last[active_idx] + eps) / (sd_mcmc[active_idx] + eps))
+    )
+
+    active_sd_ratio = sd_last[active_idx] / (sd_mcmc[active_idx] + eps)
+
+    active_mean_zerr_median = float(np.median(active_mean_zerr))
+    active_mean_zerr_mean = float(np.mean(active_mean_zerr))
+
+    active_sd_logerr_median = float(np.median(active_sd_logerr))
+    active_sd_logerr_mean = float(np.mean(active_sd_logerr))
+
+    active_sd_ratio_median = float(np.median(active_sd_ratio))
+    active_sd_ratio_mean = float(np.mean(active_sd_ratio))
+
+    moment_recovery_score = active_mean_zerr_median + active_sd_logerr_median
+
+    marg_skl = []
+    for j in active_idx:
+        marg_skl.append(kde_skl_1d(beta_last[:, j], beta_mcmc[:, j]))
+
+    joint_skl = []
+    for j, k in active_pairs(beta_true_np, max_pairs=10):
+        joint_skl.append(
+            kde_skl_2d(
+                beta_last[:, [j, k]],
+                beta_mcmc[:, [j, k]],
+            )
+        )
+
+    active_marg_skl_median = float(np.median(marg_skl))
+    active_marg_skl_mean = float(np.mean(marg_skl))
+
+    active_joint_skl_median = float(np.median(joint_skl))
+    active_joint_skl_mean = float(np.mean(joint_skl))
+
+    gate_mean = gate_last.mean(axis=0)
+    softgate_absdiff = np.abs(gate_mean - pip_mcmc)
+
+    softgate_absdiff_median = float(np.median(softgate_absdiff))
+    softgate_absdiff_mean = float(np.mean(softgate_absdiff))
+
+    zero_leak = np.abs(beta_last[:, zero_idx].mean(axis=0))
+
+    zero_soft_leakage_median = float(np.median(zero_leak))
+    zero_soft_leakage_mean = float(np.mean(zero_leak))
+
+    return {
+        "moment_recovery_score": float(moment_recovery_score),
+        "recovery_score": float(moment_recovery_score),
+
+        "active_mean_zerr_median": active_mean_zerr_median,
+        "active_mean_zerr_mean": active_mean_zerr_mean,
+
+        "active_sd_logerr_median": active_sd_logerr_median,
+        "active_sd_logerr_mean": active_sd_logerr_mean,
+
+        "active_sd_ratio_median": active_sd_ratio_median,
+        "active_sd_ratio_mean": active_sd_ratio_mean,
+
+        "sd_ratio_median": active_sd_ratio_median,
+        "sd_ratio_mean": active_sd_ratio_mean,
+
+        "active_marg_skl_median": active_marg_skl_median,
+        "active_marg_skl_mean": active_marg_skl_mean,
+
+        "active_joint_skl_median": active_joint_skl_median,
+        "active_joint_skl_mean": active_joint_skl_mean,
+
+        "softgate_absdiff_median": softgate_absdiff_median,
+        "softgate_absdiff_mean": softgate_absdiff_mean,
+
+        "zero_soft_leakage_median": zero_soft_leakage_median,
+        "zero_soft_leakage_mean": zero_soft_leakage_mean,
+    }

@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import normflows as nf
 
+
 class SemanticAffineCoupling(nn.Module):
     """
     Affine coupling layer on semantic blocks of xi = [s, u, t].
@@ -18,20 +19,21 @@ class SemanticAffineCoupling(nn.Module):
     def __init__(self, p, mode, hidden_units=128, num_hidden_layers=2, scale_clip=2.0):
         super().__init__()
         assert mode in {"s", "u", "t"}
+
         self.p = int(p)
         self.dim = 2 * p + 1
         self.mode = mode
         self.scale_clip = float(scale_clip)
 
         if mode == "s":
-            cond_dim = p + 1      # (u, t)
-            trans_dim = p         # s
+            cond_dim = p + 1
+            trans_dim = p
         elif mode == "u":
-            cond_dim = p + 1      # (s, t)
-            trans_dim = p         # u
-        else:  # mode == "t"
-            cond_dim = 2 * p      # (s, u)
-            trans_dim = 1         # t
+            cond_dim = p + 1
+            trans_dim = p
+        else:
+            cond_dim = 2 * p
+            trans_dim = 1
 
         widths = [cond_dim] + [hidden_units] * num_hidden_layers + [2 * trans_dim]
         self.net = nf.nets.MLP(widths, init_zeros=True)
@@ -57,23 +59,22 @@ class SemanticAffineCoupling(nn.Module):
         if self.mode == "s":
             cond = torch.cat([u, t], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            s_new = s * torch.exp(log_scale) + shift
-            y = self._merge(s_new, u, t)
+            s = s * torch.exp(log_scale) + shift
             logdet = log_scale.sum(dim=-1)
 
         elif self.mode == "u":
             cond = torch.cat([s, t], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            u_new = u * torch.exp(log_scale) + shift
-            y = self._merge(s, u_new, t)
+            u = u * torch.exp(log_scale) + shift
             logdet = log_scale.sum(dim=-1)
 
-        else:  # mode == "t"
+        else:
             cond = torch.cat([s, u], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            t_new = t * torch.exp(log_scale) + shift
-            y = self._merge(s, u, t_new)
+            t = t * torch.exp(log_scale) + shift
             logdet = log_scale.sum(dim=-1)
+
+        y = self._merge(s, u, t)
 
         if return_logdet:
             return y, logdet
@@ -85,23 +86,22 @@ class SemanticAffineCoupling(nn.Module):
         if self.mode == "s":
             cond = torch.cat([u, t], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            s_old = (s - shift) * torch.exp(-log_scale)
-            x = self._merge(s_old, u, t)
+            s = (s - shift) * torch.exp(-log_scale)
             logdet = (-log_scale).sum(dim=-1)
 
         elif self.mode == "u":
             cond = torch.cat([s, t], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            u_old = (u - shift) * torch.exp(-log_scale)
-            x = self._merge(s, u_old, t)
+            u = (u - shift) * torch.exp(-log_scale)
             logdet = (-log_scale).sum(dim=-1)
 
-        else:  # mode == "t"
+        else:
             cond = torch.cat([s, u], dim=-1)
             log_scale, shift = self._affine_params(cond)
-            t_old = (t - shift) * torch.exp(-log_scale)
-            x = self._merge(s, u, t_old)
+            t = (t - shift) * torch.exp(-log_scale)
             logdet = (-log_scale).sum(dim=-1)
+
+        x = self._merge(s, u, t)
 
         if return_logdet:
             return x, logdet
@@ -109,8 +109,15 @@ class SemanticAffineCoupling(nn.Module):
 
 
 class FlowMap(nn.Module):
-    def __init__(self, p=None, dim=None, K=4,
-                 hidden_units=128, num_hidden_layers=2, scale_clip=2.0):
+    def __init__(
+        self,
+        p=None,
+        dim=None,
+        K=4,
+        hidden_units=128,
+        num_hidden_layers=2,
+        scale_clip=2.0,
+    ):
         super().__init__()
 
         if p is None:
@@ -124,26 +131,32 @@ class FlowMap(nn.Module):
         self.dim = 2 * self.p + 1
 
         layers = []
+
         for _ in range(K):
             layers.append(
                 SemanticAffineCoupling(
-                    p=self.p, mode="s",
+                    p=self.p,
+                    mode="s",
                     hidden_units=hidden_units,
                     num_hidden_layers=num_hidden_layers,
                     scale_clip=scale_clip,
                 )
             )
+
             layers.append(
                 SemanticAffineCoupling(
-                    p=self.p, mode="u",
+                    p=self.p,
+                    mode="u",
                     hidden_units=hidden_units,
                     num_hidden_layers=num_hidden_layers,
                     scale_clip=scale_clip,
                 )
             )
+
             layers.append(
                 SemanticAffineCoupling(
-                    p=self.p, mode="t",
+                    p=self.p,
+                    mode="t",
                     hidden_units=hidden_units,
                     num_hidden_layers=num_hidden_layers,
                     scale_clip=scale_clip,
@@ -154,6 +167,7 @@ class FlowMap(nn.Module):
 
     def forward(self, x, return_logdet=False):
         z = x
+
         if return_logdet:
             total_logdet = x.new_zeros(x.shape[0])
 
@@ -170,6 +184,7 @@ class FlowMap(nn.Module):
 
     def inverse(self, z, return_logdet=False):
         x = z
+
         if return_logdet:
             total_logdet = z.new_zeros(z.shape[0])
 
@@ -184,21 +199,27 @@ class FlowMap(nn.Module):
             return x, total_logdet
         return x
 
+
 class Relaxedsas(nn.Module):
     def __init__(self, X, y, sigma2, tau, g_theta, family="gaussian"):
         super().__init__()
+
         if g_theta is None:
             raise ValueError("g_theta must be provided.")
 
         self.register_buffer("X", X)
         self.register_buffer("y", y)
-        self.register_buffer("tau", torch.tensor(float(tau), dtype=X.dtype, device=X.device))
+        self.register_buffer(
+            "tau",
+            torch.tensor(float(tau), dtype=X.dtype, device=X.device),
+        )
 
         self.family = family
+
         if family == "gaussian":
             self.register_buffer(
                 "sigma2",
-                torch.tensor(float(sigma2), dtype=X.dtype, device=X.device)
+                torch.tensor(float(sigma2), dtype=X.dtype, device=X.device),
             )
         else:
             self.sigma2 = None
@@ -233,9 +254,9 @@ class Relaxedsas(nn.Module):
 
     def log_joint(self, eps):
         dec = self.decode(eps)
-        beta = dec["beta"]                    # [R, p]
+        beta = dec["beta"]
 
-        eta = self.X @ beta.T                 # [n, R]
+        eta = self.X @ beta.T
 
         if self.family == "gaussian":
             resid = self.y[:, None] - eta
@@ -257,9 +278,11 @@ class Relaxedsas(nn.Module):
 
         return loglik + log_p0_eps
 
+
 class NBase(nn.Module):
     def __init__(self, dim, init_loc=0.0, init_log_scale=-2.5):
         super().__init__()
+
         self.dim = dim
         self.loc = nn.Parameter(torch.full((dim,), float(init_loc)))
         self.raw_log_scale = nn.Parameter(torch.full((dim,), float(init_log_scale)))
@@ -277,21 +300,26 @@ class NBase(nn.Module):
             device=self.loc.device,
             dtype=self.loc.dtype,
         )
+
         z0 = self.loc.unsqueeze(0) + self.scale().unsqueeze(0) * eta
+
         return eta, z0
 
     def log_prob(self, z0):
         log_scale = self.log_scale().unsqueeze(0)
         var = torch.exp(2.0 * log_scale)
+
         return -0.5 * (
             ((z0 - self.loc.unsqueeze(0)) ** 2) / var
             + 2.0 * log_scale
             + math.log(2.0 * math.pi)
         ).sum(dim=1)
 
+
 class FlowVI(nn.Module):
     def __init__(self, q0, posterior_flow, generative_model):
         super().__init__()
+
         self.q0 = q0
         self.posterior_flow = posterior_flow
         self.generative_model = generative_model
@@ -300,25 +328,72 @@ class FlowVI(nn.Module):
         _, z0 = self.q0.rsample(num_samples)
         eps, logdet = self.posterior_flow(z0, return_logdet=True)
         log_q_eps = self.q0.log_prob(z0) - logdet
+
         return eps, log_q_eps
 
-    def neg_elbo(self, num_samples=256, elbo_beta=1.0):
+    def neg_elbo(
+        self,
+        num_samples=256,
+        elbo_beta=1.0,
+        q_entropy_weight=0.0,
+    ):
         eps, log_q_eps = self.sample_posterior(num_samples)
         log_joint = self.generative_model.log_joint(eps)
-        return (log_q_eps - elbo_beta * log_joint).mean()
+
+        return (
+            (1.0 + float(q_entropy_weight)) * log_q_eps
+            - float(elbo_beta) * log_joint
+        ).mean()
+
+    def elbo_terms(self, num_samples=256):
+        eps, log_q_eps = self.sample_posterior(num_samples)
+        log_joint = self.generative_model.log_joint(eps)
+
+        return {
+            "log_q_eps": log_q_eps.mean(),
+            "entropy_q": -log_q_eps.mean(),
+            "log_joint": log_joint.mean(),
+            "neg_elbo": (log_q_eps - log_joint).mean(),
+        }
 
 
-def build_flow_vi(X, y, sigma2, tau, family, K_q=8, K_g=8, hidden_units=64, num_hidden_layers=2,):
+def build_flow_vi(
+    X,
+    y,
+    sigma2,
+    tau,
+    family,
+    K_q=8,
+    K_g=8,
+    hidden_units=64,
+    num_hidden_layers=2,
+):
     p = X.shape[1]
     dim = 2 * p + 1
 
-    g_theta = FlowMap(p=X.shape[1], K=K_g, hidden_units=hidden_units,
-                          num_hidden_layers=num_hidden_layers, scale_clip=2.0)
+    g_theta = FlowMap(
+        p=p,
+        K=K_g,
+        hidden_units=hidden_units,
+        num_hidden_layers=num_hidden_layers,
+        scale_clip=2.0,
+    )
 
-    generative_model = Relaxedsas(X=X, y=y, sigma2=sigma2, tau=tau, g_theta=g_theta, family=family)
+    generative_model = Relaxedsas(
+        X=X,
+        y=y,
+        sigma2=sigma2,
+        tau=tau,
+        g_theta=g_theta,
+        family=family,
+    )
 
-    q0 = NBase(dim=dim, init_loc=0.0, init_log_scale=-2.5,)
-    
+    q0 = NBase(
+        dim=dim,
+        init_loc=0.0,
+        init_log_scale=-2.5,
+    )
+
     posterior_flow = FlowMap(
         dim=dim,
         K=K_q,
@@ -327,4 +402,8 @@ def build_flow_vi(X, y, sigma2, tau, family, K_q=8, K_g=8, hidden_units=64, num_
         scale_clip=2.0,
     )
 
-    return FlowVI(q0=q0, posterior_flow=posterior_flow, generative_model=generative_model,)
+    return FlowVI(
+        q0=q0,
+        posterior_flow=posterior_flow,
+        generative_model=generative_model,
+    )
