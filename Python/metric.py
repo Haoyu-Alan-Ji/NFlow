@@ -1,90 +1,67 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Sequence, Mapping
-from sklearn.metrics import roc_auc_score, average_precision_score
+from typing import Any, Dict, Mapping, Optional, Sequence
+
 import numpy as np
 import pandas as pd
-from .utils import Array, to_numpy
 from scipy.stats import gaussian_kde
+from sklearn.metrics import average_precision_score, roc_auc_score
+
+from .utils import to_numpy
+
+Array = np.ndarray
+
 
 def _torch():
     import torch
     return torch
 
 
-def _to_torch_float_cpu(x):
+def _tensor(x):
     torch = _torch()
     if torch.is_tensor(x):
         return x.detach().cpu().float()
     return torch.as_tensor(np.asarray(x), dtype=torch.float32)
 
 
-def _to_numpy_1d(x) -> Array:
-    arr = np.asarray(to_numpy(x))
-    if arr.ndim != 1:
-        arr = arr.reshape(-1)
-    return arr
+def _vec(x) -> Array:
+    return np.asarray(to_numpy(x), dtype=float).reshape(-1)
 
 
 def sample_posterior_latents(model, R: int = 2000) -> Dict[str, Any]:
     model.eval()
-    sample = model.q0.rsample(R)
-    if isinstance(sample, tuple):
-        _, z0 = sample
-    else:
-        z0 = sample
-
-    flow_out = model.posterior_flow(z0, return_logdet=True)
-    if isinstance(flow_out, tuple):
-        eps = flow_out[0]
-    else:
-        eps = flow_out
-
-    dec = model.generative_model.decode(eps)
-    required = ["s", "u", "t", "beta"]
-    missing = [k for k in required if k not in dec]
-    if missing:
-        raise KeyError(f"Decoded posterior is missing keys: {missing}")
-    return {k: dec[k].detach().cpu() for k in required}
+    with _torch().no_grad():
+        sample = model.q0.rsample(R)
+        z0 = sample[1] if isinstance(sample, tuple) else sample
+        out = model.posterior_flow(z0, return_logdet=True)
+        eps = out[0] if isinstance(out, tuple) else out
+        dec = model.generative_model.decode(eps)
+    keep = [
+        "eps", "xi", "s", "u", "t", "margin", "gate", "active", "beta",
+        "group_margin", "group_gate", "group_active", "group_ids",
+    ]
+    return {k: v.detach().cpu() for k, v in dec.items() if k in keep and hasattr(v, "detach")}
 
 
-def hard_support_from_draws(draws: Dict[str, Any], support_threshold: float = 0.5) -> Dict[str, Any]:
+def hard_support_from_draws(draws: Mapping[str, Any], support_threshold: float = 0.5) -> Dict[str, Any]:
     torch = _torch()
-    s = _to_torch_float_cpu(draws["s"])
-    u = _to_torch_float_cpu(draws["u"])
-    t = _to_torch_float_cpu(draws["t"])
-    if t.ndim == 1:
-        t = t.unsqueeze(1)
-    ind = (u > t).float()
-    vote_rate = ind.mean(dim=0)
-    support_mask = vote_rate > support_threshold
-    support_idx = torch.where(support_mask)[0].cpu().numpy().astype(int).tolist()
-    beta_hard_samples = s * ind
-    beta_hard_mean = beta_hard_samples.mean(dim=0)
-    boundary = (u - t).float()
+    beta = _tensor(draws["beta"])
+    active = _tensor(draws.get("active", (beta.abs() > 1e-12).float()))
+    pip = active.mean(dim=0)
+    mask = pip > float(support_threshold)
+    idx = torch.where(mask)[0].cpu().numpy().astype(int).tolist()
+    beta_hard = beta * active
     return {
-        "support_idx": support_idx,
-        "support_mask": support_mask.cpu(),
-        "support_size": len(support_idx),
-        "vote_rate": vote_rate.cpu(),
-        "support_score": vote_rate.cpu(),
-        "beta_hard_samples": beta_hard_samples.cpu(),
-        "beta_hard_mean": beta_hard_mean.cpu(),
-        "boundary": boundary.cpu(),
+        "support_idx": idx,
+        "support_mask": mask.cpu(),
+        "support_size": len(idx),
+        "vote_rate": pip.cpu(),
+        "support_score": pip.cpu(),
+        "beta_hard_samples": beta_hard.cpu(),
+        "beta_hard_mean": beta_hard.mean(dim=0).cpu(),
+        "boundary": _tensor(draws.get("margin", beta)).cpu(),
     }
-
-
-def posterior_predictions_from_hard_samples(X, beta_hard_samples, family: str = "gaussian"):
-    torch = _torch()
-    X = _to_torch_float_cpu(X)
-    beta_hard_samples = _to_torch_float_cpu(beta_hard_samples)
-    eta = X @ beta_hard_samples.T
-    if family == "gaussian":
-        return eta
-    if family == "poisson":
-        return torch.exp(eta)
-    raise ValueError(f"Unknown family: {family}")
 
 
 def selection_metrics_from_support(
@@ -95,559 +72,249 @@ def selection_metrics_from_support(
     eps: float = 1e-12,
 ) -> Dict[str, float]:
     if beta_true is not None:
-        beta_true_np = _to_numpy_1d(beta_true)
-        truth = np.abs(beta_true_np) > eps
-        p = int(beta_true_np.shape[0])
-        true_support = set(np.flatnonzero(truth).astype(int).tolist())
-    elif active_idx is not None:
-        if p is None:
-            raise ValueError("p must be provided when using active_idx without beta_true.")
-        true_support = set(np.asarray(active_idx, dtype=int).tolist())
+        truth = np.abs(_vec(beta_true)) > eps
+        p = len(truth)
+        true_set = set(np.flatnonzero(truth).astype(int))
     else:
-        raise ValueError("Either beta_true or active_idx must be provided.")
-
+        true_set = set(np.asarray(active_idx, dtype=int).tolist())
+        p = int(p)
     selected = set(int(j) for j in support_idx)
-    tp = len(selected & true_support)
-    fp = len(selected - true_support)
-    fn = len(true_support - selected)
+    tp = len(selected & true_set)
+    fp = len(selected - true_set)
+    fn = len(true_set - selected)
     tn = int(p) - tp - fp - fn
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    fdr = fp / (tp + fp) if (tp + fp) > 0 else 0.0
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    fdr = fp / (tp + fp) if tp + fp else 0.0
     return {
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1": float(f1),
-        "fdr": float(fdr),
-        "tp": float(tp),
-        "fp": float(fp),
-        "fn": float(fn),
-        "tn": float(tn),
+        "precision": float(precision), "recall": float(recall), "f1": float(f1), "fdr": float(fdr),
+        "tp": float(tp), "fp": float(fp), "fn": float(fn), "tn": float(tn),
         "support_size": float(len(selected)),
     }
 
 
-def support_metrics(
-    selected_support: Sequence[int],
-    beta_true=None,
-    active_idx: Optional[Sequence[int]] = None,
-    p: Optional[int] = None,
-    eps: float = 1e-12,
-) -> Dict[str, float]:
-    if beta_true is None and active_idx is None:
-        return {}
-    return selection_metrics_from_support(selected_support, beta_true=beta_true, active_idx=active_idx, p=p, eps=eps)
-
-
-def gaussian_predictive_metrics(y_true, y_pred, sigma2: Optional[float]) -> Dict[str, float]:
-    y_true = np.asarray(to_numpy(y_true), dtype=float).reshape(-1)
-    y_pred = np.asarray(to_numpy(y_pred), dtype=float).reshape(-1)
-    resid = y_true - y_pred
-    mse = float(np.mean(resid ** 2))
-    rmse = float(np.sqrt(max(mse, 0.0)))
-    mae = float(np.mean(np.abs(resid)))
-    denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
-    r2 = float(1.0 - np.sum(resid ** 2) / denom) if denom > 0 else float("nan")
-    out = {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2}
-    if sigma2 is not None:
-        sigma2 = float(max(float(sigma2), 1e-12))
-        loglik = float(np.mean(-0.5 * (np.log(2.0 * np.pi * sigma2) + resid ** 2 / sigma2)))
-        out["heldout_loglik"] = loglik
-        out["nll"] = -loglik
-    else:
-        out["heldout_loglik"] = float("nan")
-        out["nll"] = float("nan")
-    return out
-
-
-def posterior_predictive_metrics_from_hard_samples(X, y, beta_hard_samples, sigma2: Optional[float] = None, family: str = "gaussian") -> Dict[str, float]:
-    torch = _torch()
-    X = _to_torch_float_cpu(X)
-    y = _to_torch_float_cpu(y).view(-1)
-    beta_hard_samples = _to_torch_float_cpu(beta_hard_samples)
-    eta = X @ beta_hard_samples.T
-    if family == "gaussian":
-        pred_draws = eta
-    elif family == "poisson":
-        pred_draws = torch.exp(eta)
-    else:
-        raise ValueError(f"Unknown family: {family}")
-    yhat = pred_draws.mean(dim=1)
-    resid = y - yhat
-    mse = resid.pow(2).mean().item()
-    rmse = mse ** 0.5
-    mae = resid.abs().mean().item()
-    ss_res = resid.pow(2).sum().item()
-    ss_tot = ((y - y.mean()) ** 2).sum().item()
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-    out = {"mse": float(mse), "rmse": float(rmse), "mae": float(mae), "r2": float(r2)}
-    if family == "gaussian":
-        if sigma2 is not None:
-            sigma2 = float(max(float(sigma2), 1e-12))
-            ll = -0.5 * (((y[:, None] - pred_draws) ** 2) / sigma2 + math.log(2.0 * math.pi * sigma2))
-            out["heldout_loglik"] = torch.logsumexp(ll, dim=1).sub(math.log(pred_draws.shape[1])).mean().item()
-            out["nll"] = -out["heldout_loglik"]
-        else:
-            out["heldout_loglik"] = float("nan")
-            out["nll"] = float("nan")
-    else:
-        mu = pred_draws.clamp_min(1e-8)
-        ll = y[:, None] * torch.log(mu) - mu - torch.lgamma(y[:, None] + 1.0)
-        out["heldout_loglik"] = torch.logsumexp(ll, dim=1).sub(math.log(mu.shape[1])).mean().item()
-        out["nll"] = -out["heldout_loglik"]
-        y_safe = y.clamp_min(1e-8)
-        yhat_safe = yhat.clamp_min(1e-8)
-        dev = 2.0 * torch.where(y > 0, y * torch.log(y_safe / yhat_safe) - (y - yhat_safe), -(y - yhat_safe))
-        out["poisson_deviance"] = dev.mean().item()
-    return out
-
-
-def ranking_metrics(
-    *,
-    support_score,
-    beta_true=None,
-    active_idx=None,
-    p=None,
-):
+def ranking_metrics(*, support_score, beta_true=None, active_idx=None, p=None) -> Dict[str, float]:
     score = np.asarray(support_score, dtype=float)
-
     if beta_true is not None:
-        truth = (np.asarray(beta_true) != 0.0).astype(int)
+        truth = (np.abs(np.asarray(beta_true, dtype=float)) > 1e-12).astype(int)
     else:
-        if p is None:
-            p = len(score)
-        truth = np.zeros(int(p), dtype=int)
+        truth = np.zeros(int(p or len(score)), dtype=int)
         if active_idx is not None:
             truth[np.asarray(active_idx, dtype=int)] = 1
-
-    # AUROC is undefined if only one class is present.
     if len(np.unique(truth)) < 2:
-        auroc = np.nan
-        auprc = np.nan
-    else:
-        auroc = float(roc_auc_score(truth, score))
-        auprc = float(average_precision_score(truth, score))
-
+        return {"auroc": np.nan, "auprc": np.nan}
     return {
-        "auroc": auroc,
-        "auprc": auprc,
+        "auroc": float(roc_auc_score(truth, score)),
+        "auprc": float(average_precision_score(truth, score)),
     }
 
 
-def flow_row_from_result(out_flow):
-    """
-    Convert one flow result into one benchmark summary row.
-    """
-    import numpy as np
-    from .metric import ranking_metrics
-
-    final = out_flow["final"]
-    sim_info = out_flow.get("sim_info", {}) or {}
-
-    selection = dict(final.get("selection_metrics", {}))
-
-    var_table = final.get("var_table", None)
-
-    if var_table is not None and not var_table.empty:
-        if "support_score" in var_table.columns:
-            score = var_table.sort_values("j")["support_score"].to_numpy(dtype=float)
-        elif "hard_freq" in var_table.columns:
-            score = var_table.sort_values("j")["hard_freq"].to_numpy(dtype=float)
-        elif "selected" in var_table.columns:
-            score = var_table.sort_values("j")["selected"].to_numpy(dtype=float)
-        else:
-            score = None
-
-        if score is not None:
-            beta_true = None
-            active_idx = sim_info.get("active_idx", None)
-
-            if "beta_true" in var_table.columns:
-                beta_true = var_table.sort_values("j")["beta_true"].to_numpy(dtype=float)
-
-            ranking = ranking_metrics(
-                support_score=score,
-                beta_true=beta_true,
-                active_idx=active_idx,
-                p=len(score),
-            )
-            selection.update(ranking)
-
-    train_metrics = final.get("train_metrics", {})
-    val_metrics = final.get("val_metrics", {})
-    test_metrics = final.get("test_metrics", {})
-
-    row = {
-        "method": out_flow.get("method", "flow_stagewise"),
-        "seed": out_flow.get("seed"),
-        "runtime_sec": out_flow.get("runtime_sec"),
-        "converged": True,
-        "n_iter": out_flow.get("n_iter", None),
-        "selected_ckpt_id": out_flow.get("selected_ckpt_id"),
-
-        "support_size": selection.get("support_size"),
-        "precision": selection.get("precision"),
-        "recall": selection.get("recall"),
-        "f1": selection.get("f1"),
-        "auroc": selection.get("auroc"),
-        "auprc": selection.get("auprc"),
-        "fdr": selection.get("fdr"),
-        "tp": selection.get("tp"),
-        "fp": selection.get("fp"),
-        "fn": selection.get("fn"),
-        "tn": selection.get("tn"),
-
-        "train_mse": train_metrics.get("mse"),
-        "val_mse": val_metrics.get("mse"),
-        "test_mse": test_metrics.get("mse"),
-
-        "train_r2": train_metrics.get("r2"),
-        "val_r2": val_metrics.get("r2"),
-        "test_r2": test_metrics.get("r2"),
-
-        "train_nll": train_metrics.get("nll"),
-        "val_nll": val_metrics.get("nll"),
-        "test_nll": test_metrics.get("nll"),
+def predictive_metrics(X, y, beta_hard_samples, sigma2: Optional[float] = None, family: str = "gaussian") -> Dict[str, float]:
+    torch = _torch()
+    X = _tensor(X)
+    y = _tensor(y).view(-1)
+    B = _tensor(beta_hard_samples)
+    eta = X @ B.T
+    if family == "gaussian":
+        pred = eta
+    elif family == "poisson":
+        pred = torch.exp(eta)
+    elif family in {"bernoulli", "binomial", "logistic"}:
+        pred = torch.sigmoid(eta)
+    else:
+        raise ValueError(f"Unknown family: {family}")
+    yhat = pred.mean(dim=1)
+    resid = y - yhat
+    mse = resid.pow(2).mean().item()
+    out = {
+        "mse": float(mse),
+        "rmse": float(mse ** 0.5),
+        "mae": float(resid.abs().mean().item()),
+        "r2": float(1.0 - resid.pow(2).sum().item() / ((y - y.mean()).pow(2).sum().item() + 1e-12)),
     }
-
-    sim_keys = [
-        "sim",
-        "setting",
-        "n",
-        "p",
-        "n_active",
-        "n_active_target",
-        "sigma2",
-        "sigma",
-        "signal_var",
-        "outcome_var",
-        "snr_actual",
-        "center_y",
-        "rho",
-        "noise_x",
-        "block_size",
-        "group_size",
-        "n_groups",
-        "one_active_per_group",
-        "beta_low",
-        "beta_high",
-    ]
-
-    for key in sim_keys:
-        if key in sim_info:
-            row[key] = sim_info[key]
-
-    return row
-
-def benchmark_row_from_result(result: Mapping[str, Any]) -> Dict[str, Any]:
-    selection = result.get("selection_metrics", {}) or {}
-    pred = result.get("predictive_metrics", {}) or {}
-    sim_info = result.get("sim_info", {}) or {}
-
-    row: Dict[str, Any] = {
-        "method": result.get("method"),
-        "seed": result.get("seed"),
-        "runtime_sec": result.get("runtime_sec"),
-        "converged": result.get("converged"),
-        "n_iter": result.get("n_iter"),
-        "support_size": selection.get("support_size"),
-        "precision": selection.get("precision"),
-        "recall": selection.get("recall"),
-        "f1": selection.get("f1"),
-        "auroc": selection.get("auroc"),
-        "auprc": selection.get("auprc"),
-        "fdr": selection.get("fdr"),
-        "tp": selection.get("tp"),
-        "fp": selection.get("fp"),
-        "fn": selection.get("fn"),
-        "tn": selection.get("tn"),
-        "train_mse": pred.get("train", {}).get("mse"),
-        "val_mse": pred.get("val", {}).get("mse"),
-        "test_mse": pred.get("test", {}).get("mse"),
-        "train_r2": pred.get("train", {}).get("r2"),
-        "val_r2": pred.get("val", {}).get("r2"),
-        "test_r2": pred.get("test", {}).get("r2"),
-        "train_nll": pred.get("train", {}).get("nll"),
-        "val_nll": pred.get("val", {}).get("nll"),
-        "test_nll": pred.get("test", {}).get("nll"),
-    }
-
-    for key in ["n", "p", "snr", "true_prop", "n_active", "sigma2"]:
-        if key in sim_info:
-            row[key] = sim_info[key]
-    return row
+    if family == "gaussian" and sigma2 is not None:
+        s2 = max(float(sigma2), 1e-12)
+        ll = -0.5 * (((y[:, None] - eta) ** 2) / s2 + math.log(2.0 * math.pi * s2))
+        out["heldout_loglik"] = torch.logsumexp(ll, dim=1).sub(math.log(eta.shape[1])).mean().item()
+        out["nll"] = -out["heldout_loglik"]
+    return out
 
 
-def predictive_metrics(X, y, beta_hard_samples, sigma2: Optional[float] = None, family: str = "gaussian"):
-    return posterior_predictive_metrics_from_hard_samples(X, y, beta_hard_samples, sigma2=sigma2, family=family)
-
-def print_result(out, *, top_k=20):
-    final = out.get("final", {})
-
-    method = out.get("method", "unknown")
-    seed = out.get("seed", None)
-
-    selection_metrics = dict(
-        out.get("selection_metrics", final.get("selection_metrics", {})) or {}
-    )
-
-    summary_row = out.get("summary_row", {})
-    if "auroc" not in selection_metrics and "auroc" in summary_row:
-        selection_metrics["auroc"] = summary_row["auroc"]
-    if "auprc" not in selection_metrics and "auprc" in summary_row:
-        selection_metrics["auprc"] = summary_row["auprc"]
-
-    predictive_metrics = out.get("predictive_metrics", final.get("predictive_metrics", None))
-    var_table = out.get("var_table", final.get("var_table", None))
-    pred_table = out.get("pred_table", final.get("pred_table", None))
-    selected_support = out.get("selected_support", final.get("selected_support", []))
-
-    print(f"===== {method} result =====")
-    print(f"seed          : {seed}")
-
-    if out.get("runtime_sec", None) is not None:
-        print(f"runtime_sec   : {out.get('runtime_sec'):.6f}")
-
-    if out.get("converged", None) is not None:
-        print(f"converged     : {out.get('converged')}")
-
-    if out.get("n_iter", None) is not None:
-        print(f"n_iter        : {out.get('n_iter')}")
-
-    if out.get("selected_ckpt_id", None) is not None:
-        print(f"selected_ckpt : {out.get('selected_ckpt_id')}")
-
-    if out.get("support_threshold", None) is not None:
-        print(f"threshold     : {out.get('support_threshold')}")
-
-    if out.get("sigma2", None) is not None:
-        print(f"sigma2        : {out.get('sigma2')}")
-
-    print(f"selected_size : {len(selected_support)}")
-
-    print("\n===== Selection metrics =====")
-    if selection_metrics:
-        print(pd.DataFrame([selection_metrics]).to_string(index=False))
-    else:
-        print("(empty selection_metrics)")
-
-    print("\n===== Selected support =====")
-    print(selected_support)
-
-    print(f"\n===== Top {top_k} variables =====")
-    if isinstance(var_table, pd.DataFrame) and not var_table.empty:
-        vt = var_table.copy()
-
-        if "support_score" in vt.columns:
-            vt = vt.sort_values("support_score", ascending=False)
-        elif "pip" in vt.columns:
-            vt = vt.sort_values("pip", ascending=False)
-        elif "hard_freq" in vt.columns:
-            vt = vt.sort_values("hard_freq", ascending=False)
-        elif "beta_hard_mean" in vt.columns:
-            vt = vt.sort_values("beta_hard_mean", key=lambda x: x.abs(), ascending=False)
-        elif "abs_beta_mean" in vt.columns:
-            vt = vt.sort_values("abs_beta_mean", ascending=False)
-        elif "beta_mean" in vt.columns:
-            vt = vt.sort_values("beta_mean", key=lambda x: x.abs(), ascending=False)
-
-        print(vt.head(top_k).to_string(index=False))
-    else:
-        print("(empty var_table)")
-
-    print("\n===== Predictive metrics =====")
-
-    if isinstance(pred_table, pd.DataFrame) and not pred_table.empty:
-        print(pred_table.to_string(index=False))
-    elif predictive_metrics:
-        rows = []
-        for split, metrics in predictive_metrics.items():
-            row = {"split": split}
-            row.update(metrics)
-            rows.append(row)
-        print(pd.DataFrame(rows).to_string(index=False))
-    else:
-        train_metrics = final.get("train_metrics", {})
-        val_metrics = final.get("val_metrics", {})
-        test_metrics = final.get("test_metrics", {})
-
-        rows = []
-        if train_metrics:
-            rows.append({"split": "train", **train_metrics})
-        if val_metrics:
-            rows.append({"split": "val", **val_metrics})
-        if test_metrics:
-            rows.append({"split": "test", **test_metrics})
-
-        if rows:
-            print(pd.DataFrame(rows).to_string(index=False))
-        else:
-            print("(empty predictive metrics)")
-
-
-def normal_cdf(x):
-    x = np.asarray(x, dtype=float)
-    erf_vec = np.vectorize(math.erf, otypes=[float])
-    return 0.5 * (1.0 + erf_vec(x / math.sqrt(2.0)))
-
-
-def prob_abs_gt_eps(mu, sd, eps: float):
-    mu = np.asarray(mu, dtype=float)
-    sd = np.asarray(sd, dtype=float)
-    sd_safe = np.maximum(sd, 1e-12)
-    upper = 1.0 - normal_cdf((eps - mu) / sd_safe)
-    lower = normal_cdf((-eps - mu) / sd_safe)
-    return np.clip(upper + lower, 0.0, 1.0)
-
-
-def symmetric_kl_grid(p, q, eps=1e-12):
-    p = np.maximum(p, eps)
-    q = np.maximum(q, eps)
-    p = p / p.sum()
-    q = q / q.sum()
+def _skl_grid(p, q, eps=1e-12):
+    p = np.maximum(np.asarray(p, dtype=float), eps)
+    q = np.maximum(np.asarray(q, dtype=float), eps)
+    p /= p.sum(); q /= q.sum()
     return float(0.5 * (np.sum(p * np.log(p / q)) + np.sum(q * np.log(q / p))))
 
 
 def kde_skl_1d(x, y, n_grid=128):
+    x = np.asarray(x, dtype=float); y = np.asarray(y, dtype=float)
     lo = min(np.quantile(x, 0.001), np.quantile(y, 0.001))
     hi = max(np.quantile(x, 0.999), np.quantile(y, 0.999))
     pad = 0.1 * (hi - lo + 1e-8)
-
     grid = np.linspace(lo - pad, hi + pad, n_grid)
-
-    p = gaussian_kde(x)(grid)
-    q = gaussian_kde(y)(grid)
-
-    return symmetric_kl_grid(p, q)
+    return _skl_grid(gaussian_kde(x)(grid), gaussian_kde(y)(grid))
 
 
 def kde_skl_2d(X, Y, n_grid=35):
+    X = np.asarray(X, dtype=float); Y = np.asarray(Y, dtype=float)
     xlo = min(np.quantile(X[:, 0], 0.001), np.quantile(Y[:, 0], 0.001))
     xhi = max(np.quantile(X[:, 0], 0.999), np.quantile(Y[:, 0], 0.999))
     ylo = min(np.quantile(X[:, 1], 0.001), np.quantile(Y[:, 1], 0.001))
     yhi = max(np.quantile(X[:, 1], 0.999), np.quantile(Y[:, 1], 0.999))
-
-    xpad = 0.1 * (xhi - xlo + 1e-8)
-    ypad = 0.1 * (yhi - ylo + 1e-8)
-
-    gx = np.linspace(xlo - xpad, xhi + xpad, n_grid)
-    gy = np.linspace(ylo - ypad, yhi + ypad, n_grid)
-
+    gx = np.linspace(xlo - 0.1 * (xhi - xlo + 1e-8), xhi + 0.1 * (xhi - xlo + 1e-8), n_grid)
+    gy = np.linspace(ylo - 0.1 * (yhi - ylo + 1e-8), yhi + 0.1 * (yhi - ylo + 1e-8), n_grid)
     xx, yy = np.meshgrid(gx, gy)
     pts = np.vstack([xx.ravel(), yy.ravel()])
-
-    p = gaussian_kde(X.T)(pts)
-    q = gaussian_kde(Y.T)(pts)
-
-    return symmetric_kl_grid(p, q)
+    return _skl_grid(gaussian_kde(X.T)(pts), gaussian_kde(Y.T)(pts))
 
 
-def active_pairs(beta_true_np, max_pairs=10):
-    idx = np.where(np.abs(beta_true_np) > 1e-12)[0]
-    idx = idx[np.argsort(-np.abs(beta_true_np[idx]))]
+def bernoulli_js(p, q, eps=1e-12):
+    p = float(np.clip(p, eps, 1.0 - eps))
+    q = float(np.clip(q, eps, 1.0 - eps))
+    P = np.array([1 - p, p]); Q = np.array([1 - q, q]); M = 0.5 * (P + Q)
+    return float(0.5 * np.sum(P * np.log(P / M)) + 0.5 * np.sum(Q * np.log(Q / M)))
 
-    out = []
+
+def _active_pairs(beta_true, max_pairs=10):
+    idx = np.flatnonzero(np.abs(beta_true) > 1e-12)
+    idx = idx[np.argsort(-np.abs(beta_true[idx]))]
+    pairs = []
     for a in range(len(idx)):
         for b in range(a + 1, len(idx)):
-            out.append((int(idx[a]), int(idx[b])))
+            pairs.append((int(idx[a]), int(idx[b])))
+    return pairs[:max_pairs]
 
-    return out[:max_pairs]
 
+def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int = 10) -> Dict[str, float]:
+    beta_last = np.asarray(to_numpy(beta_last), dtype=float)
+    active_last = np.asarray(to_numpy(active_last), dtype=float)
+    beta_ref = np.asarray(mcmc_ref["beta"], dtype=float)
+    pip_ref = np.asarray(mcmc_ref["pip"], dtype=float)
+    beta_true = _vec(beta_true)
+    active_idx = np.flatnonzero(np.abs(beta_true) > 1e-12)
+    zero_idx = np.flatnonzero(np.abs(beta_true) <= 1e-12)
+    pip = active_last.mean(axis=0)
 
-def recovery_metrics(beta_last, gate_last, beta_true, mcmc_ref):
-    beta_mcmc = mcmc_ref["beta"]
-    pip_mcmc = mcmc_ref["pip"]
+    active_skl = [kde_skl_1d(beta_last[:, j], beta_ref[:, j]) for j in active_idx]
+    joint_skl = [kde_skl_2d(beta_last[:, [j, k]], beta_ref[:, [j, k]]) for j, k in _active_pairs(beta_true, max_pairs)]
+    zero_js = [bernoulli_js(pip[j], pip_ref[j]) for j in zero_idx]
+    pip_js = [bernoulli_js(pip[j], pip_ref[j]) for j in active_idx]
+    all_pip_js = [bernoulli_js(pip[j], pip_ref[j]) for j in range(len(pip))]
 
-    beta_true_np = to_numpy(beta_true)
-    active_idx = np.where(np.abs(beta_true_np) > 1e-12)[0]
-    zero_idx = np.where(np.abs(beta_true_np) <= 1e-12)[0]
-
-    eps = 1e-8
-
-    mean_last = beta_last.mean(axis=0)
-    mean_mcmc = beta_mcmc.mean(axis=0)
-
-    sd_last = beta_last.std(axis=0, ddof=1)
-    sd_mcmc = beta_mcmc.std(axis=0, ddof=1)
-
-    active_mean_zerr = np.abs(
-        (mean_last[active_idx] - mean_mcmc[active_idx])
-        / (sd_mcmc[active_idx] + eps)
-    )
-
-    active_sd_logerr = np.abs(
-        np.log((sd_last[active_idx] + eps) / (sd_mcmc[active_idx] + eps))
-    )
-
-    active_sd_ratio = sd_last[active_idx] / (sd_mcmc[active_idx] + eps)
-
-    active_mean_zerr_median = float(np.median(active_mean_zerr))
-    active_mean_zerr_mean = float(np.mean(active_mean_zerr))
-
-    active_sd_logerr_median = float(np.median(active_sd_logerr))
-    active_sd_logerr_mean = float(np.mean(active_sd_logerr))
-
-    active_sd_ratio_median = float(np.median(active_sd_ratio))
-    active_sd_ratio_mean = float(np.mean(active_sd_ratio))
-
-    moment_recovery_score = active_mean_zerr_median + active_sd_logerr_median
-
-    marg_skl = []
-    for j in active_idx:
-        marg_skl.append(kde_skl_1d(beta_last[:, j], beta_mcmc[:, j]))
-
-    joint_skl = []
-    for j, k in active_pairs(beta_true_np, max_pairs=10):
-        joint_skl.append(
-            kde_skl_2d(
-                beta_last[:, [j, k]],
-                beta_mcmc[:, [j, k]],
-            )
-        )
-
-    active_marg_skl_median = float(np.median(marg_skl))
-    active_marg_skl_mean = float(np.mean(marg_skl))
-
-    active_joint_skl_median = float(np.median(joint_skl))
-    active_joint_skl_mean = float(np.mean(joint_skl))
-
-    gate_mean = gate_last.mean(axis=0)
-    softgate_absdiff = np.abs(gate_mean - pip_mcmc)
-
-    softgate_absdiff_median = float(np.median(softgate_absdiff))
-    softgate_absdiff_mean = float(np.mean(softgate_absdiff))
-
-    zero_leak = np.abs(beta_last[:, zero_idx].mean(axis=0))
-
-    zero_soft_leakage_median = float(np.median(zero_leak))
-    zero_soft_leakage_mean = float(np.mean(zero_leak))
-
-    return {
-        "moment_recovery_score": float(moment_recovery_score),
-        "recovery_score": float(moment_recovery_score),
-
-        "active_mean_zerr_median": active_mean_zerr_median,
-        "active_mean_zerr_mean": active_mean_zerr_mean,
-
-        "active_sd_logerr_median": active_sd_logerr_median,
-        "active_sd_logerr_mean": active_sd_logerr_mean,
-
-        "active_sd_ratio_median": active_sd_ratio_median,
-        "active_sd_ratio_mean": active_sd_ratio_mean,
-
-        "sd_ratio_median": active_sd_ratio_median,
-        "sd_ratio_mean": active_sd_ratio_mean,
-
-        "active_marg_skl_median": active_marg_skl_median,
-        "active_marg_skl_mean": active_marg_skl_mean,
-
-        "active_joint_skl_median": active_joint_skl_median,
-        "active_joint_skl_mean": active_joint_skl_mean,
-
-        "softgate_absdiff_median": softgate_absdiff_median,
-        "softgate_absdiff_mean": softgate_absdiff_mean,
-
-        "zero_soft_leakage_median": zero_soft_leakage_median,
-        "zero_soft_leakage_mean": zero_soft_leakage_mean,
+    out = {
+        "joint_skl_median": float(np.nanmedian(joint_skl)) if joint_skl else np.nan,
+        "joint_skl_mean": float(np.nanmean(joint_skl)) if joint_skl else np.nan,
+        "active_marg_skl_median": float(np.nanmedian(active_skl)) if active_skl else np.nan,
+        "active_marg_skl_mean": float(np.nanmean(active_skl)) if active_skl else np.nan,
+        "zero_js_median": float(np.nanmedian(zero_js)) if zero_js else np.nan,
+        "zero_js_mean": float(np.nanmean(zero_js)) if zero_js else np.nan,
+        "pip_js_median": float(np.nanmedian(pip_js)) if pip_js else np.nan,
+        "pip_js_mean": float(np.nanmean(pip_js)) if pip_js else np.nan,
+        "all_pip_js_median": float(np.nanmedian(all_pip_js)),
+        "pip_absdiff_median": float(np.nanmedian(np.abs(pip - pip_ref))),
+        "pip_absdiff_mean": float(np.nanmean(np.abs(pip - pip_ref))),
+        "expected_support": float(pip.sum()),
     }
+    out.update({
+        "active_joint_skl_median": out["joint_skl_median"],
+        "active_joint_skl_mean": out["joint_skl_mean"],
+    })
+    return out
+
+
+def flow_row_from_result(out_flow: Mapping[str, Any]) -> Dict[str, Any]:
+    final = out_flow.get("final", {}) or {}
+    sim_info = out_flow.get("sim_info", {}) or {}
+    model_config = out_flow.get("model_config", {}) or {}
+    row = {
+        "method": out_flow.get("method"),
+        "seed": out_flow.get("seed"),
+        "runtime_sec": out_flow.get("runtime_sec"),
+        "selected_ckpt_id": out_flow.get("selected_ckpt_id"),
+        "mcmc_available": out_flow.get("mcmc_info", {}).get("mcmc_available"),
+        "coupling_type": model_config.get("coupling_type"),
+        "conditioner_type": model_config.get("conditioner_type"),
+        "beta_mode": model_config.get("beta_mode"),
+        "K_q": model_config.get("K_q"),
+        "K_g": model_config.get("K_g"),
+        "reported_layers": model_config.get("reported_layers"),
+    }
+    for k in ["joint_skl_median", "active_marg_skl_median", "zero_js_median", "pip_js_median", "pip_absdiff_mean"]:
+        row[k] = final.get("recovery_metrics", {}).get(k, np.nan)
+    for k, v in (final.get("selection_metrics", {}) or {}).items():
+        row[k] = v
+    for split in ["train", "val", "test"]:
+        for k, v in (final.get(f"{split}_metrics", {}) or {}).items():
+            row[f"{split}_{k}"] = v
+    for k in ["setting", "n", "p", "n_active", "sigma2", "sigma", "rho", "beta_low", "beta_high"]:
+        if k in sim_info:
+            row[k] = sim_info[k]
+    return row
+
+
+def print_result(out: Mapping[str, Any], *, top_k: int = 20) -> None:
+    final = out.get("final", {}) or {}
+    print(f"===== {out.get('method', 'flow')} result =====")
+    print(f"seed          : {out.get('seed')}")
+    print(f"selected_ckpt : {out.get('selected_ckpt_id')}")
+    print(f"mcmc_available: {out.get('mcmc_info', {}).get('mcmc_available')}")
+    rec = final.get("recovery_metrics", {}) or {}
+    if rec:
+        print("\n===== Posterior recovery =====")
+        cols = ["joint_skl_median", "active_marg_skl_median", "zero_js_median", "pip_js_median", "pip_absdiff_mean"]
+        print(pd.DataFrame([{k: rec.get(k) for k in cols}]).to_string(index=False))
+    vt = final.get("var_table")
+    if isinstance(vt, pd.DataFrame) and not vt.empty:
+        print(f"\n===== Top {top_k} variables by PIP =====")
+        print(vt.sort_values("pip", ascending=False).head(top_k).to_string(index=False))
+
+
+def summarize_ci(table, metrics=None, group_cols=None, level: float = 0.95):
+    """
+    Summarize per-seed recovery metrics across repeated runs.
+
+    Input is usually a concatenated summary_row.csv table.  The returned table
+    contains mean, sd, n, se, and a two-sided confidence interval for each metric.
+    """
+    from scipy.stats import t as student_t
+
+    df = pd.DataFrame(table).copy()
+    if metrics is None:
+        metrics = [
+            "joint_skl_median",
+            "active_marg_skl_median",
+            "zero_js_median",
+            "pip_js_median",
+        ]
+    group_cols = list(group_cols or [])
+    rows = []
+
+    grouped = [((), df)] if not group_cols else df.groupby(group_cols, dropna=False)
+    for key, g in grouped:
+        if group_cols and not isinstance(key, tuple):
+            key = (key,)
+        prefix = dict(zip(group_cols, key)) if group_cols else {}
+        for m in metrics:
+            if m not in g.columns:
+                continue
+            x = pd.to_numeric(g[m], errors="coerce").dropna().to_numpy(dtype=float)
+            n = int(len(x))
+            mean = float(np.mean(x)) if n else np.nan
+            sd = float(np.std(x, ddof=1)) if n > 1 else np.nan
+            se = float(sd / np.sqrt(n)) if n > 1 else np.nan
+            q = float(student_t.ppf(0.5 + level / 2.0, df=n - 1)) if n > 1 else np.nan
+            rows.append({
+                **prefix,
+                "metric": m,
+                "n": n,
+                "mean": mean,
+                "sd": sd,
+                "se": se,
+                "ci_level": float(level),
+                "ci_lower": mean - q * se if n > 1 else np.nan,
+                "ci_upper": mean + q * se if n > 1 else np.nan,
+            })
+    return pd.DataFrame(rows)
+

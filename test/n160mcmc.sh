@@ -1,13 +1,13 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=mcmc-n160p100
-#SBATCH --output=logs/mcmc-n160p100-%A_%a.out
-#SBATCH --error=logs/mcmc-n160p100-%A_%a.err
+#SBATCH --job-name=mcmc-n160
+#SBATCH --output=logs/mcmc-n160-%A_%a.out
+#SBATCH --error=logs/mcmc-n160-%A_%a.err
 
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=12g
+#SBATCH --mem=24g
 #SBATCH --tmp=12g
 
 #SBATCH --array=1-100%50
@@ -22,7 +22,8 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-MANIFEST=data/manifest_n160p100.csv
+RUN_R=test/run.R
+MANIFEST=data/n160p100/manifest_n160p100.csv
 
 N_MCMC=10000
 S_MAX=100
@@ -32,6 +33,7 @@ BETA_EPS=0.5
 SPLIT_SEED=12345
 
 echo "TASK_ID=${SLURM_ARRAY_TASK_ID}"
+echo "RUN_R=${RUN_R}"
 echo "MANIFEST=${MANIFEST}"
 echo "N_MCMC=${N_MCMC}"
 echo "S_MAX=${S_MAX}"
@@ -42,8 +44,8 @@ echo "SPLIT_SEED=${SPLIT_SEED}"
 echo "HOSTNAME=$(hostname)"
 echo "PWD=$(pwd)"
 
-test -f run.R
+test -f ${RUN_R}
 test -f ${MANIFEST}
 
-Rscript run.R ${MANIFEST} ${SLURM_ARRAY_TASK_ID} \
+Rscript ${RUN_R} ${MANIFEST} ${SLURM_ARRAY_TASK_ID} \
   ${N_MCMC} ${S_MAX} ${BURNIN} ${THIN} ${BETA_EPS} ${SPLIT_SEED}

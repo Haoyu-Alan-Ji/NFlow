@@ -1,126 +1,67 @@
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import normflows as nf
 
 
-def beta_config(p, beta_mode="sigmoid", group_ids=None, group_sizes=None, device=None):
+class MLP(nn.Module):
     """
-    Return:
-        s_dim, u_dim, dim, normalized_group_ids
+    Conditioner network used inside the semantic normalizing flow.
 
-    sigmoid:
-        xi = [s, u, t]
-        s in R^p, u in R^p, t in R
-        beta_j = s_j * sigmoid((u_j - t) / tau)
-        dim = 2p + 1
-
-    relu:
-        xi = [s, u, t]
-        s in R^p, u in R^p, t in R
-        beta_j = s_j * (u_j - t)_+
-        dim = 2p + 1
-
-    group_relu:
-        xi = [s, u, t]
-        s in R^p, u in R^G, t in R
-        beta_j = s_j * (u_{g(j)} - t)_+
-        dim = p + G + 1
-
-    In group_relu, grouping is applied to the threshold coordinate u, not to s.
-    This preserves feature-specific coefficient signs and magnitudes while enforcing
-    group-level activation.
+    This MLP is not the Bayesian neural network itself.
+    It only produces affine-coupling parameters for the variational flow.
     """
-    p = int(p)
 
-    if beta_mode in {"sigmoid", "relu"}:
-        return p, p, 2 * p + 1, None
+    def __init__(self, in_dim, out_dim, hidden_units=128, num_hidden_layers=2):
+        super().__init__()
 
-    if beta_mode != "group_relu":
-        raise ValueError(f"Unknown beta_mode: {beta_mode}")
+        layers = []
+        d = int(in_dim)
 
-    if group_sizes is not None:
-        if group_ids is not None:
-            raise ValueError("Provide either group_ids or group_sizes, not both.")
+        for _ in range(int(num_hidden_layers)):
+            layers += [nn.Linear(d, int(hidden_units)), nn.ReLU()]
+            d = int(hidden_units)
 
-        sizes = [int(size) for size in group_sizes]
-        if any(size <= 0 for size in sizes):
-            raise ValueError("All group_sizes must be positive.")
-        if sum(sizes) != p:
-            raise ValueError(f"sum(group_sizes)={sum(sizes)} must equal p={p}.")
+        layers.append(nn.Linear(d, int(out_dim)))
+        self.net = nn.Sequential(*layers)
 
-        gids = torch.cat([
-            torch.full((size,), g, dtype=torch.long, device=device)
-            for g, size in enumerate(sizes)
-        ])
-    else:
-        if group_ids is None:
-            raise ValueError("group_relu requires group_ids or group_sizes.")
+        # Start each coupling transformation close to identity.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
 
-        gids = torch.as_tensor(group_ids, dtype=torch.long, device=device)
-        if gids.ndim != 1:
-            raise ValueError("group_ids must be a one-dimensional vector.")
-        if gids.numel() != p:
-            raise ValueError(f"len(group_ids)={gids.numel()} must equal p={p}.")
-
-    unique = torch.unique(gids, sorted=True)
-    new_gids = torch.empty_like(gids)
-    for g, old_g in enumerate(unique):
-        new_gids[gids == old_g] = g
-
-    G = int(len(unique))
-
-    # Correct group_relu layout: s is feature-level, u is group-level.
-    s_dim = p
-    u_dim = G
-    dim = p + G + 1
-
-    return s_dim, u_dim, dim, new_gids
+    def forward(self, x):
+        return self.net(x)
 
 
-class SemanticAffineCoupling(nn.Module):
+class SemanticLayer(nn.Module):
     """
-    Affine coupling layer on semantic blocks xi = [s, u, t].
+    One semantic affine-coupling layer over xi=(s,u,t).
 
-    Supported layouts:
-        ungrouped: s in R^p, u in R^p, t in R
-        grouped:   s in R^p, u in R^G, t in R
+    s: active-side magnitude coordinates.
+    u: local evidence coordinates.
+    t: global threshold coordinates.
 
-    Modes:
-        - "s": update s conditional on (u, t)
-        - "u": update u conditional on (s, t)
-        - "t": update t conditional on (s, u)
+    The layer updates only one block among s, u, and t, while conditioning
+    on the other two blocks. This keeps the flow role-aware.
     """
+
     def __init__(
         self,
-        p=None,
-        mode=None,
-        s_dim=None,
-        u_dim=None,
+        s_dim,
+        u_dim,
+        t_dim,
+        mode,
         hidden_units=128,
         num_hidden_layers=2,
         scale_clip=2.0,
     ):
         super().__init__()
-        assert mode in {"s", "u", "t"}
-
-        if s_dim is None or u_dim is None:
-            if p is None:
-                raise ValueError("Provide either p or both s_dim and u_dim.")
-            s_dim = int(p)
-            u_dim = int(p)
 
         self.s_dim = int(s_dim)
         self.u_dim = int(u_dim)
-        self.t_dim = 1
-        self.dim = self.s_dim + self.u_dim + self.t_dim
+        self.t_dim = int(t_dim)
         self.mode = mode
         self.scale_clip = float(scale_clip)
-
-        if self.s_dim <= 0 or self.u_dim <= 0:
-            raise ValueError("s_dim and u_dim must be positive.")
 
         if mode == "s":
             cond_dim = self.u_dim + self.t_dim
@@ -132,82 +73,87 @@ class SemanticAffineCoupling(nn.Module):
             cond_dim = self.s_dim + self.u_dim
             trans_dim = self.t_dim
 
-        widths = [cond_dim] + [hidden_units] * num_hidden_layers + [2 * trans_dim]
-        self.net = nf.nets.MLP(widths, init_zeros=True)
-
-    def _split(self, x):
-        s_end = self.s_dim
-        u_end = self.s_dim + self.u_dim
-        s = x[:, :s_end]
-        u = x[:, s_end:u_end]
-        t = x[:, u_end:u_end + 1]
-        return s, u, t
-
-    def _merge(self, s, u, t):
-        return torch.cat([s, u, t], dim=-1)
-
-    def _affine_params(self, cond):
-        h = self.net(cond)
-        log_scale, shift = torch.chunk(h, 2, dim=-1)
-        log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
-        return log_scale, shift
+        self.net = MLP(
+            in_dim=cond_dim,
+            out_dim=2 * trans_dim,
+            hidden_units=hidden_units,
+            num_hidden_layers=num_hidden_layers,
+        )
 
     def forward(self, x, return_logdet=False):
-        s, u, t = self._split(x)
+        s = x[:, :self.s_dim]
+        u = x[:, self.s_dim:self.s_dim + self.u_dim]
+        t = x[:, self.s_dim + self.u_dim:]
 
         if self.mode == "s":
-            cond = torch.cat([u, t], dim=-1)
-            log_scale, shift = self._affine_params(cond)
+            cond = torch.cat([u, t], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
             s = s * torch.exp(log_scale) + shift
-            logdet = log_scale.sum(dim=-1)
-        elif self.mode == "u":
-            cond = torch.cat([s, t], dim=-1)
-            log_scale, shift = self._affine_params(cond)
-            u = u * torch.exp(log_scale) + shift
-            logdet = log_scale.sum(dim=-1)
-        else:
-            cond = torch.cat([s, u], dim=-1)
-            log_scale, shift = self._affine_params(cond)
-            t = t * torch.exp(log_scale) + shift
-            logdet = log_scale.sum(dim=-1)
 
-        y = self._merge(s, u, t)
+        elif self.mode == "u":
+            cond = torch.cat([s, t], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
+            u = u * torch.exp(log_scale) + shift
+
+        else:
+            cond = torch.cat([s, u], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
+            t = t * torch.exp(log_scale) + shift
+
+        y = torch.cat([s, u, t], dim=1)
+        logdet = log_scale.sum(dim=1)
+
         if return_logdet:
             return y, logdet
         return y
 
     def inverse(self, y, return_logdet=False):
-        s, u, t = self._split(y)
+        s = y[:, :self.s_dim]
+        u = y[:, self.s_dim:self.s_dim + self.u_dim]
+        t = y[:, self.s_dim + self.u_dim:]
 
         if self.mode == "s":
-            cond = torch.cat([u, t], dim=-1)
-            log_scale, shift = self._affine_params(cond)
+            cond = torch.cat([u, t], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
             s = (s - shift) * torch.exp(-log_scale)
-            logdet = (-log_scale).sum(dim=-1)
-        elif self.mode == "u":
-            cond = torch.cat([s, t], dim=-1)
-            log_scale, shift = self._affine_params(cond)
-            u = (u - shift) * torch.exp(-log_scale)
-            logdet = (-log_scale).sum(dim=-1)
-        else:
-            cond = torch.cat([s, u], dim=-1)
-            log_scale, shift = self._affine_params(cond)
-            t = (t - shift) * torch.exp(-log_scale)
-            logdet = (-log_scale).sum(dim=-1)
 
-        x = self._merge(s, u, t)
+        elif self.mode == "u":
+            cond = torch.cat([s, t], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
+            u = (u - shift) * torch.exp(-log_scale)
+
+        else:
+            cond = torch.cat([s, u], dim=1)
+            log_scale, shift = torch.chunk(self.net(cond), 2, dim=1)
+            log_scale = self.scale_clip * torch.tanh(log_scale / self.scale_clip)
+            t = (t - shift) * torch.exp(-log_scale)
+
+        x = torch.cat([s, u, t], dim=1)
+        logdet = -log_scale.sum(dim=1)
+
         if return_logdet:
             return x, logdet
         return x
 
 
-class FlowMap(nn.Module):
+class SemanticFlow(nn.Module):
+    """
+    Single posterior flow T_psi: z0 -> xi.
+
+    This is the only flow in the model.
+    There is no second generative flow g_theta.
+    """
+
     def __init__(
         self,
-        p=None,
-        dim=None,
-        s_dim=None,
-        u_dim=None,
+        s_dim,
+        u_dim,
+        t_dim,
         K=4,
         hidden_units=128,
         num_hidden_layers=2,
@@ -215,68 +161,57 @@ class FlowMap(nn.Module):
     ):
         super().__init__()
 
-        if s_dim is None or u_dim is None:
-            if p is not None:
-                s_dim = int(p)
-                u_dim = int(p)
-            elif dim is not None:
-                dim = int(dim)
-                if (dim - 1) % 2 != 0:
-                    raise ValueError("If s_dim/u_dim are omitted, dim must equal 2*p + 1.")
-                p = (dim - 1) // 2
-                s_dim = p
-                u_dim = p
-            else:
-                raise ValueError("Provide either p, dim, or both s_dim and u_dim.")
-
         self.s_dim = int(s_dim)
         self.u_dim = int(u_dim)
-        self.t_dim = 1
+        self.t_dim = int(t_dim)
         self.dim = self.s_dim + self.u_dim + self.t_dim
 
-        if dim is not None and int(dim) != self.dim:
-            raise ValueError(f"dim={dim} is inconsistent with s_dim + u_dim + 1 = {self.dim}.")
+        self.layers = nn.ModuleList()
 
-        layers = []
-        for _ in range(K):
-            layers.append(SemanticAffineCoupling(
-                s_dim=self.s_dim,
-                u_dim=self.u_dim,
-                mode="s",
-                hidden_units=hidden_units,
-                num_hidden_layers=num_hidden_layers,
-                scale_clip=scale_clip,
-            ))
-            layers.append(SemanticAffineCoupling(
-                s_dim=self.s_dim,
-                u_dim=self.u_dim,
-                mode="u",
-                hidden_units=hidden_units,
-                num_hidden_layers=num_hidden_layers,
-                scale_clip=scale_clip,
-            ))
-            layers.append(SemanticAffineCoupling(
-                s_dim=self.s_dim,
-                u_dim=self.u_dim,
-                mode="t",
-                hidden_units=hidden_units,
-                num_hidden_layers=num_hidden_layers,
-                scale_clip=scale_clip,
-            ))
+        for _ in range(int(K)):
+            self.layers.append(
+                SemanticLayer(
+                    self.s_dim,
+                    self.u_dim,
+                    self.t_dim,
+                    mode="s",
+                    hidden_units=hidden_units,
+                    num_hidden_layers=num_hidden_layers,
+                    scale_clip=scale_clip,
+                )
+            )
 
-        self.layers = nn.ModuleList(layers)
+            self.layers.append(
+                SemanticLayer(
+                    self.s_dim,
+                    self.u_dim,
+                    self.t_dim,
+                    mode="u",
+                    hidden_units=hidden_units,
+                    num_hidden_layers=num_hidden_layers,
+                    scale_clip=scale_clip,
+                )
+            )
+
+            self.layers.append(
+                SemanticLayer(
+                    self.s_dim,
+                    self.u_dim,
+                    self.t_dim,
+                    mode="t",
+                    hidden_units=hidden_units,
+                    num_hidden_layers=num_hidden_layers,
+                    scale_clip=scale_clip,
+                )
+            )
 
     def forward(self, x, return_logdet=False):
         z = x
-        if return_logdet:
-            total_logdet = x.new_zeros(x.shape[0])
+        total_logdet = x.new_zeros(x.shape[0])
 
         for layer in self.layers:
-            if return_logdet:
-                z, logdet = layer(z, return_logdet=True)
-                total_logdet = total_logdet + logdet
-            else:
-                z = layer(z)
+            z, logdet = layer(z, return_logdet=True)
+            total_logdet = total_logdet + logdet
 
         if return_logdet:
             return z, total_logdet
@@ -284,325 +219,528 @@ class FlowMap(nn.Module):
 
     def inverse(self, z, return_logdet=False):
         x = z
-        if return_logdet:
-            total_logdet = z.new_zeros(z.shape[0])
+        total_logdet = z.new_zeros(z.shape[0])
 
         for layer in reversed(self.layers):
-            if return_logdet:
-                x, logdet = layer.inverse(x, return_logdet=True)
-                total_logdet = total_logdet + logdet
-            else:
-                x = layer.inverse(x)
+            x, logdet = layer.inverse(x, return_logdet=True)
+            total_logdet = total_logdet + logdet
 
         if return_logdet:
             return x, total_logdet
         return x
 
 
-class Relaxedsas(nn.Module):
-    def __init__(
-        self,
-        X,
-        y,
-        sigma2,
-        tau,
-        g_theta,
-        family="gaussian",
-        beta_mode="sigmoid",
-        group_ids=None,
-    ):
+class NBase(nn.Module):
+    """
+    Trainable diagonal Gaussian base distribution q0(z0).
+
+    The variational posterior q_psi(xi) is induced by:
+        z0 ~ q0
+        xi = T_psi(z0)
+    """
+
+    def __init__(self, dim, init_log_scale=-2.5):
         super().__init__()
 
-        if g_theta is None:
-            raise ValueError("g_theta must be provided.")
-        if beta_mode not in {"sigmoid", "relu", "group_relu"}:
-            raise ValueError(f"Unknown beta_mode: {beta_mode}")
-
-        self.register_buffer("X", X)
-        self.register_buffer("y", y)
-        self.register_buffer(
-            "tau",
-            torch.tensor(float(tau), dtype=X.dtype, device=X.device),
+        self.dim = int(dim)
+        self.loc = nn.Parameter(torch.zeros(self.dim))
+        self.raw_log_scale = nn.Parameter(
+            torch.full((self.dim,), float(init_log_scale))
         )
 
-        self.family = family
-        self.beta_mode = beta_mode
-        self.n, self.p = X.shape
-        self.g_theta = g_theta
-        self.s_dim = int(g_theta.s_dim)
-        self.u_dim = int(g_theta.u_dim)
-        self.dim = int(g_theta.dim)
-
-        if beta_mode == "group_relu":
-            if group_ids is None:
-                raise ValueError("group_relu requires group_ids.")
-            group_ids = torch.as_tensor(group_ids, dtype=torch.long, device=X.device)
-            if group_ids.ndim != 1:
-                raise ValueError("group_ids must be one-dimensional.")
-            if group_ids.numel() != self.p:
-                raise ValueError(f"len(group_ids)={group_ids.numel()} must equal p={self.p}.")
-            self.register_buffer("group_ids", group_ids)
-            self.G = int(group_ids.max().item()) + 1
-            if self.s_dim != self.p:
-                raise ValueError(f"group_relu requires s_dim=p={self.p}, got s_dim={self.s_dim}.")
-            if self.u_dim != self.G:
-                raise ValueError(f"group_relu requires u_dim=G={self.G}, got u_dim={self.u_dim}.")
-        else:
-            self.group_ids = None
-            self.G = None
-            if self.s_dim != self.p or self.u_dim != self.p:
-                raise ValueError(
-                    f"{beta_mode} requires s_dim=u_dim=p={self.p}, "
-                    f"got s_dim={self.s_dim}, u_dim={self.u_dim}."
-                )
-
-        if family == "gaussian":
-            self.register_buffer(
-                "sigma2",
-                torch.tensor(float(sigma2), dtype=X.dtype, device=X.device),
-            )
-        else:
-            self.sigma2 = None
-
-    def set_tau(self, tau):
-        self.tau.fill_(float(tau))
-
-    def _split_xi(self, xi):
-        s_end = self.s_dim
-        u_end = self.s_dim + self.u_dim
-        s = xi[:, :s_end]
-        u = xi[:, s_end:u_end]
-        t = xi[:, u_end:u_end + 1]
-        return s, u, t
-
-    def decode(self, eps):
-        xi = self.g_theta(eps)
-        s, u, t = self._split_xi(xi)
-
-        if self.beta_mode == "sigmoid":
-            margin = u - t
-            gate = torch.sigmoid(margin / self.tau)
-            active = (margin > 0.0).to(gate.dtype)
-            beta = s * gate
-            return {
-                "eps": eps,
-                "xi": xi,
-                "s": s,
-                "u": u,
-                "t": t,
-                "margin": margin,
-                "gate": gate,
-                "active": active,
-                "beta": beta,
-            }
-
-        if self.beta_mode == "relu":
-            margin = u - t
-            gate = F.relu(margin)
-            active = (margin > 0.0).to(gate.dtype)
-            beta = s * gate
-            return {
-                "eps": eps,
-                "xi": xi,
-                "s": s,
-                "u": u,
-                "t": t,
-                "margin": margin,
-                "gate": gate,
-                "active": active,
-                "beta": beta,
-            }
-
-        # group_relu:
-        # s is feature-level: [R, p]
-        # u is group-level:   [R, G]
-        # gate_j = (u_{g(j)} - t)_+
-        group_margin = u - t
-        group_gate = F.relu(group_margin)
-        group_active = (group_margin > 0.0).to(group_gate.dtype)
-
-        margin = group_margin[:, self.group_ids]
-        gate = group_gate[:, self.group_ids]
-        active = group_active[:, self.group_ids]
-        beta = s * gate
-
-        return {
-            "eps": eps,
-            "xi": xi,
-            "s": s,
-            "u": u,
-            "t": t,
-            "margin": margin,
-            "gate": gate,
-            "active": active,
-            "group_margin": group_margin,
-            "group_gate": group_gate,
-            "group_active": group_active,
-            "group_ids": self.group_ids,
-            "beta": beta,
-        }
-
-    def log_joint(self, eps):
-        dec = self.decode(eps)
-        beta = dec["beta"]
-        eta = self.X @ beta.T
-
-        if self.family == "gaussian":
-            resid = self.y[:, None] - eta
-            loglik = -0.5 * (
-                resid.pow(2).sum(dim=0) / self.sigma2
-                + self.n * torch.log(2.0 * torch.pi * self.sigma2)
-            )
-        elif self.family == "poisson":
-            y = self.y[:, None]
-            loglik = (y * eta - torch.exp(eta) - torch.lgamma(y + 1.0)).sum(dim=0)
-        elif self.family in {"bernoulli", "binomial", "logistic"}:
-            y = self.y[:, None].expand_as(eta)
-
-            loglik = -F.binary_cross_entropy_with_logits(
-                eta,
-                y,
-                reduction="none",
-            ).sum(dim=0)
-        else:
-            raise ValueError(f"Unknown family: {self.family}")
-
-        log_p0_eps = -0.5 * (
-            eps.pow(2) + math.log(2.0 * math.pi)
-        ).sum(dim=1)
-
-        return loglik + log_p0_eps
-
-
-class NBase(nn.Module):
-    def __init__(self, dim, init_loc=0.0, init_log_scale=-2.5):
-        super().__init__()
-        self.dim = int(dim)
-        self.loc = nn.Parameter(torch.full((self.dim,), float(init_loc)))
-        self.raw_log_scale = nn.Parameter(torch.full((self.dim,), float(init_log_scale)))
-
-    def log_scale(self):
-        return torch.clamp(self.raw_log_scale, min=-5.0, max=2.0)
-
-    def scale(self):
-        return torch.exp(self.log_scale())
-
-    def rsample(self, num_samples):
-        eta = torch.randn(
-            num_samples,
+    def sample(self, R):
+        eps = torch.randn(
+            int(R),
             self.dim,
             device=self.loc.device,
             dtype=self.loc.dtype,
         )
-        z0 = self.loc.unsqueeze(0) + self.scale().unsqueeze(0) * eta
-        return eta, z0
+
+        log_scale = torch.clamp(self.raw_log_scale, min=-5.0, max=2.0)
+        z0 = self.loc[None, :] + torch.exp(log_scale)[None, :] * eps
+
+        return z0
 
     def log_prob(self, z0):
-        log_scale = self.log_scale().unsqueeze(0)
+        log_scale = torch.clamp(self.raw_log_scale, min=-5.0, max=2.0)[None, :]
         var = torch.exp(2.0 * log_scale)
+
         return -0.5 * (
-            ((z0 - self.loc.unsqueeze(0)) ** 2) / var
+            ((z0 - self.loc[None, :]) ** 2) / var
             + 2.0 * log_scale
             + math.log(2.0 * math.pi)
         ).sum(dim=1)
 
 
-class FlowVI(nn.Module):
-    def __init__(self, q0, posterior_flow, generative_model):
+class DSSBNNDecoder(nn.Module):
+    """
+    Deterministic DSS decoder D(xi) -> neural-network parameters.
+
+    Each residual FFN block uses:
+        hidden = activation(h W1^T + b1)
+        branch = hidden W2^T + b2
+        h_next = branch + projection(h)
+
+    Every W, b, and projection P is generated by a DSS semantic rule.
+
+    Unbounded mode:
+        theta = lambda * s * relu(u - t)
+
+    Bounded mode with bounded=(-1,1):
+        theta = B * tanh(s) * relu(u - t)/(1 + relu(u - t))
+
+    Bounded mode still has exact zeros because relu(u-t)=0 when u<=t.
+    There is no sigmoid relaxation in this model.
+    """
+
+    def __init__(
+        self,
+        layer_dims,
+        ffn_dims=None,
+        lambda_w=1.0,
+        lambda_b=1.0,
+        lambda_p=1.0,
+        bounded=None,
+        projection="identity_or_sparse",
+        ffn_activation="relu",
+    ):
         super().__init__()
-        self.q0 = q0
-        self.posterior_flow = posterior_flow
-        self.generative_model = generative_model
 
-    def sample_posterior(self, num_samples):
-        _, z0 = self.q0.rsample(num_samples)
-        eps, logdet = self.posterior_flow(z0, return_logdet=True)
-        log_q_eps = self.q0.log_prob(z0) - logdet
-        return eps, log_q_eps
+        self.layer_dims = [int(x) for x in layer_dims]
+        self.ffn_dims = ffn_dims
 
-    def neg_elbo(self, num_samples=256, elbo_beta=1.0):
+        self.lambda_w = float(lambda_w)
+        self.lambda_b = float(lambda_b)
+        self.lambda_p = float(lambda_p)
+
+        self.bounded = bounded
+        self.projection = projection
+        self.ffn_activation = ffn_activation
+
+        # bounded=None means unbounded parameters.
+        # bounded=(-1,1) means final decoded parameters are inside [-1,1].
+        if bounded is None:
+            self.bound = None
+        else:
+            self.bound = float(max(abs(float(bounded[0])), abs(float(bounded[1]))))
+
+        self.layers_spec = []
+
+        # m indexes the flattened s/u coordinates.
+        # g indexes the threshold coordinates.
+        m = 0
+        g = 0
+
+        for k, (din, dout) in enumerate(zip(self.layer_dims[:-1], self.layer_dims[1:])):
+            if ffn_dims is None:
+                dff = max(din, dout)
+            else:
+                dff = int(ffn_dims[k])
+
+            # First FFN matrix: W1 in R^{dff x din}.
+            W1 = {
+                "start": m,
+                "end": m + dff * din,
+                "t": g,
+                "shape": (dff, din),
+                "lambda": self.lambda_w,
+            }
+            m += dff * din
+            g += 1
+
+            # First FFN bias: b1 in R^{dff}.
+            b1 = {
+                "start": m,
+                "end": m + dff,
+                "t": g,
+                "shape": (dff,),
+                "lambda": self.lambda_b,
+            }
+            m += dff
+            g += 1
+
+            # Second FFN matrix: W2 in R^{dout x dff}.
+            W2 = {
+                "start": m,
+                "end": m + dout * dff,
+                "t": g,
+                "shape": (dout, dff),
+                "lambda": self.lambda_w,
+            }
+            m += dout * dff
+            g += 1
+
+            # Second FFN bias: b2 in R^{dout}.
+            b2 = {
+                "start": m,
+                "end": m + dout,
+                "t": g,
+                "shape": (dout,),
+                "lambda": self.lambda_b,
+            }
+            m += dout
+            g += 1
+
+            # Projection P in R^{dout x din}.
+            # If dimensions match and projection="identity_or_sparse",
+            # no sparse P is created; identity residual is used.
+            P = None
+            if projection == "sparse" or (
+                projection == "identity_or_sparse" and din != dout
+            ):
+                P = {
+                    "start": m,
+                    "end": m + dout * din,
+                    "t": g,
+                    "shape": (dout, din),
+                    "lambda": self.lambda_p,
+                }
+                m += dout * din
+                g += 1
+
+            self.layers_spec.append(
+                {
+                    "din": din,
+                    "dff": dff,
+                    "dout": dout,
+                    "W1": W1,
+                    "b1": b1,
+                    "W2": W2,
+                    "b2": b2,
+                    "P": P,
+                }
+            )
+
+        self.s_dim = m
+        self.u_dim = m
+        self.t_dim = g
+        self.dim = 2 * self.s_dim + self.t_dim
+
+    def unpack(self, xi, return_summary=False):
         """
-        Negative ELBO without an additional q-entropy reweighting term.
+        Convert semantic coordinates xi=(s,u,t) into actual neural parameters.
 
-        Objective:
-            E_q[log q(eps) - elbo_beta * log p(y, eps)]
+        xi shape:
+            R x dim
+
+        R is the number of posterior Monte Carlo draws.
         """
-        eps, log_q_eps = self.sample_posterior(num_samples)
-        log_joint = self.generative_model.log_joint(eps)
-        return (log_q_eps - float(elbo_beta) * log_joint).mean()
 
-    def elbo_terms(self, num_samples=256):
-        eps, log_q_eps = self.sample_posterior(num_samples)
-        log_joint = self.generative_model.log_joint(eps)
-        return {
-            "log_q_eps": log_q_eps.mean(),
-            "entropy_q": -log_q_eps.mean(),
-            "log_joint": log_joint.mean(),
-            "neg_elbo": (log_q_eps - log_joint).mean(),
-        }
+        R = xi.shape[0]
+
+        s = xi[:, :self.s_dim]
+        u = xi[:, self.s_dim:self.s_dim + self.u_dim]
+        t = xi[:, self.s_dim + self.u_dim:]
+
+        layers = []
+        summary = {}
+
+        for k, spec in enumerate(self.layers_spec):
+            layer_out = {}
+
+            for name in ("W1", "b1", "W2", "b2", "P"):
+                item = spec[name]
+
+                if item is None:
+                    layer_out[name] = None
+                    continue
+
+                sl = slice(item["start"], item["end"])
+
+                # margin = local evidence - global threshold
+                margin = u[:, sl] - t[:, item["t"]:item["t"] + 1]
+
+                # ReLU DSS gate.
+                # This gives exact zero when margin <= 0.
+                raw_gate = F.relu(margin)
+
+                if self.bound is None:
+                    # General unbounded model:
+                    # theta = lambda * s * (u - t)_+
+                    gate = raw_gate
+                    val = item["lambda"] * s[:, sl] * gate
+                else:
+                    # Bounded model:
+                    # theta = B * tanh(s) * r/(1+r), r=(u-t)_+
+                    #
+                    # This keeps exact zero and avoids sigmoid relaxation.
+                    gate = raw_gate / (1.0 + raw_gate)
+                    val = self.bound * torch.tanh(s[:, sl]) * gate
+
+                layer_out[name] = val.reshape(R, *item["shape"])
+
+                if return_summary:
+                    active = (margin > 0).to(xi.dtype)
+
+                    summary[f"{name}{k}_pip"] = active.mean(dim=0).reshape(
+                        item["shape"]
+                    )
+
+                    summary[f"{name}{k}_gate_mean"] = gate.mean(dim=0).reshape(
+                        item["shape"]
+                    )
+
+                    summary[f"{name}{k}_mean"] = layer_out[name].mean(dim=0)
+
+                    summary[f"{name}{k}_sd"] = layer_out[name].std(dim=0).reshape(
+                        item["shape"]
+                    )
+
+            layers.append(layer_out)
+
+        if return_summary:
+            summary["t_mean"] = t.mean(dim=0)
+            summary["t_sd"] = t.std(dim=0)
+            return layers, summary
+
+        return layers
+
+    def forward(self, X, xi):
+        """
+        Forward pass through posterior-sampled BNN.
+
+        X shape:
+            n x p
+
+        xi shape:
+            R x dim
+
+        output shape:
+            R x n          for scalar output
+            R x n x C      for multi-class output
+        """
+
+        layers = self.unpack(xi, return_summary=False)
+
+        # h shape: R x n x p
+        h = X[None, :, :].expand(
+            xi.shape[0],
+            X.shape[0],
+            X.shape[1],
+        )
+
+        for k, spec in enumerate(self.layers_spec):
+            W1 = layers[k]["W1"]
+            b1 = layers[k]["b1"]
+            W2 = layers[k]["W2"]
+            b2 = layers[k]["b2"]
+            P = layers[k]["P"]
+
+            # First FFN affine map:
+            # hidden = h W1^T + b1
+            hidden = torch.bmm(h, W1.transpose(1, 2)) + b1[:, None, :]
+
+            # FFN activation.
+            # Default is ReLU.
+            if self.ffn_activation == "gelu":
+                hidden = F.gelu(hidden)
+            elif self.ffn_activation == "tanh":
+                hidden = torch.tanh(hidden)
+            else:
+                hidden = F.relu(hidden)
+
+            # Second FFN affine map:
+            # branch = activation(h W1^T + b1) W2^T + b2
+            branch = torch.bmm(hidden, W2.transpose(1, 2)) + b2[:, None, :]
+
+            # Residual / projection update.
+            if self.projection == "none":
+                h = branch
+            elif P is not None:
+                h = branch + torch.bmm(h, P.transpose(1, 2))
+            elif spec["din"] == spec["dout"]:
+                h = branch + h
+            else:
+                h = branch
+
+        if h.shape[-1] == 1:
+            return h[..., 0]
+
+        return h
 
 
-def build_flow_vi(
-    X,
-    y,
-    sigma2,
-    tau,
-    family,
-    beta_mode="sigmoid",
-    group_ids=None,
-    group_sizes=None,
-    K_q=8,
-    K_g=8,
-    hidden_units=64,
-    num_hidden_layers=2,
-):
-    p = X.shape[1]
+class LaSTBNNVI(nn.Module):
+    """
+    Single-flow LaST-BNN variational model.
 
-    s_dim, u_dim, dim, gids = beta_config(
-        p=p,
-        beta_mode=beta_mode,
-        group_ids=group_ids,
-        group_sizes=group_sizes,
-        device=X.device,
-    )
+    Sampling path:
+        z0 ~ q0
+        xi = T_psi(z0)
+        Theta = D(xi)
+        y ~ p(y | X, Theta)
 
-    g_theta = FlowMap(
-        s_dim=s_dim,
-        u_dim=u_dim,
-        K=K_g,
-        hidden_units=hidden_units,
-        num_hidden_layers=num_hidden_layers,
+    Negative ELBO:
+        E_q[log q(xi) - log p(y | X, D(xi)) - log p0(xi)]
+    """
+
+    def __init__(
+        self,
+        X,
+        y,
+        layer_dims,
+        ffn_dims=None,
+        family="gaussian",
+        sigma2=1.0,
+        K_flow=4,
+        flow_hidden_units=128,
+        flow_hidden_layers=2,
         scale_clip=2.0,
-    )
+        lambda_w=1.0,
+        lambda_b=1.0,
+        lambda_p=1.0,
+        bounded=None,
+        projection="identity_or_sparse",
+        ffn_activation="relu",
+    ):
+        super().__init__()
 
-    generative_model = Relaxedsas(
-        X=X,
-        y=y,
-        sigma2=sigma2,
-        tau=tau,
-        g_theta=g_theta,
-        family=family,
-        beta_mode=beta_mode,
-        group_ids=gids,
-    )
+        self.register_buffer("X", X)
+        self.register_buffer("y", y)
 
-    q0 = NBase(
-        dim=dim,
-        init_loc=0.0,
-        init_log_scale=-2.5,
-    )
+        self.register_buffer(
+            "sigma2",
+            torch.tensor(float(sigma2), dtype=X.dtype, device=X.device),
+        )
 
-    posterior_flow = FlowMap(
-        s_dim=s_dim,
-        u_dim=u_dim,
-        K=K_q,
-        hidden_units=hidden_units,
-        num_hidden_layers=num_hidden_layers,
-        scale_clip=2.0,
-    )
+        self.family = family
 
-    return FlowVI(
-        q0=q0,
-        posterior_flow=posterior_flow,
-        generative_model=generative_model,
-    )
+        self.decoder = DSSBNNDecoder(
+            layer_dims=layer_dims,
+            ffn_dims=ffn_dims,
+            lambda_w=lambda_w,
+            lambda_b=lambda_b,
+            lambda_p=lambda_p,
+            bounded=bounded,
+            projection=projection,
+            ffn_activation=ffn_activation,
+        )
+
+        self.q0 = NBase(dim=self.decoder.dim)
+
+        self.flow = SemanticFlow(
+            s_dim=self.decoder.s_dim,
+            u_dim=self.decoder.u_dim,
+            t_dim=self.decoder.t_dim,
+            K=K_flow,
+            hidden_units=flow_hidden_units,
+            num_hidden_layers=flow_hidden_layers,
+            scale_clip=scale_clip,
+        )
+
+    def sample_posterior(self, R):
+        """
+        Draw posterior samples from q_psi(xi).
+
+        Returns:
+            xi:     R x dim semantic coordinate draws
+            log_q:  R-dimensional log q_psi(xi)
+        """
+
+        z0 = self.q0.sample(R)
+        xi, logdet = self.flow(z0, return_logdet=True)
+
+        log_q = self.q0.log_prob(z0) - logdet
+
+        return xi, log_q
+
+    def log_joint(self, xi):
+        """
+        Compute log p(y | X, D(xi)) + log p0(xi).
+
+        The prior p0(xi) is standard Gaussian over semantic coordinates.
+        """
+
+        pred = self.decoder(X=self.X, xi=xi)
+
+        if self.family == "gaussian":
+            resid = self.y[None, :] - pred
+
+            loglik = -0.5 * (
+                resid.pow(2).sum(dim=1) / self.sigma2
+                + self.y.numel() * torch.log(2.0 * torch.pi * self.sigma2)
+            )
+
+        elif self.family in {"bernoulli", "binomial", "logistic"}:
+            y = self.y[None, :].expand_as(pred)
+
+            loglik = -F.binary_cross_entropy_with_logits(
+                pred,
+                y,
+                reduction="none",
+            ).sum(dim=1)
+
+        elif self.family == "multiclass":
+            logp = F.log_softmax(pred, dim=-1)
+            idx = torch.arange(self.y.numel(), device=self.y.device)
+
+            loglik = logp[:, idx, self.y.long()].sum(dim=1)
+
+        else:
+            raise ValueError(
+                "family must be gaussian, bernoulli, logistic, binomial, or multiclass"
+            )
+
+        logprior = -0.5 * (
+            xi.pow(2) + math.log(2.0 * math.pi)
+        ).sum(dim=1)
+
+        return loglik + logprior
+
+    def neg_elbo(self, R=64, elbo_beta=1.0):
+        """
+        Monte Carlo estimate of negative ELBO.
+
+        elbo_beta can be used for likelihood tempering.
+        """
+
+        xi, log_q = self.sample_posterior(R)
+        log_joint = self.log_joint(xi)
+
+        return (log_q - float(elbo_beta) * log_joint).mean()
+
+    @torch.no_grad()
+    def predict(self, X_new, R=200):
+        """
+        Posterior predictive mean.
+
+        For Gaussian:
+            returns mean prediction.
+
+        For Bernoulli:
+            returns posterior mean probability.
+
+        For multiclass:
+            returns posterior mean class-probability vector.
+        """
+
+        xi, _ = self.sample_posterior(R)
+        pred = self.decoder(X=X_new, xi=xi)
+
+        if self.family == "gaussian":
+            return pred.mean(dim=0)
+
+        if self.family in {"bernoulli", "binomial", "logistic"}:
+            return torch.sigmoid(pred).mean(dim=0)
+
+        return F.softmax(pred, dim=-1).mean(dim=0)
+
+    @torch.no_grad()
+    def posterior_summary(self, R=500):
+        """
+        Posterior summaries of DSS neural parameters.
+
+        Includes:
+            PIP = Pr(u > t | data)
+            gate_mean = E[ReLU-gate | data]
+            parameter posterior mean
+            parameter posterior sd
+        """
+
+        xi, _ = self.sample_posterior(R)
+
+        _, summary = self.decoder.unpack(
+            xi=xi,
+            return_summary=True,
+        )
+
+        return summary

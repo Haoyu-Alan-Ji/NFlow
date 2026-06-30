@@ -1,0 +1,17 @@
+{
+  "beta_mode": "sigmoid",
+  "group_ids": null,
+  "group_sizes": null,
+  "coupling_type": "semantic",
+  "conditioner_type": "mlp",
+  "hidden_units": 64,
+  "num_hidden_layers": 2,
+  "scale_clip": 2.0,
+  "affine_layers_per_step": 3,
+  "K_q": 64,
+  "K_g": 4,
+  "reported_layers": 68,
+  "reported_structure": "single_flow",
+  "implementation_structure": "double_flow",
+  "structure_note": "Training keeps posterior_flow and g_theta; reporting uses one flow depth K_q + K_g."
+}

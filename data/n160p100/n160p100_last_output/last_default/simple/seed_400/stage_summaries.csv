@@ -1,0 +1,3 @@
+stage,tau,best_ckpt_id,best_epoch,best_val_mse,best_support_size,best_checkpoint_score,n_evals
+0,0.8,4,100,13.596334457397461,100,9.17438123086276,5
+1,0.8,39,950,1.4764540195465088,9,1.442409859684447,41

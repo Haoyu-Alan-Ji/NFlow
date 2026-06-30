@@ -1,2 +1,0 @@
-Regime,n,p,Replicates,PIP-MAE,PIP-RMSE,Spearman,Jaccard,MCMC support size,LaST support size
-Near-boundary,160,100,100,0.011 (0.001),0.072 (0.004),0.601 (0.007),0.907 (0.009),8.890 (0.099),8.850 (0.119)
