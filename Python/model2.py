@@ -33,6 +33,7 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+
 class SemanticLayer(nn.Module):
     """
     One semantic affine-coupling layer over xi=(s,u,t).
