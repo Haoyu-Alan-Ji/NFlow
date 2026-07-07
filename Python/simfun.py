@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping
-
+import math
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 def simfun1(
     sim="simple",
@@ -368,5 +369,529 @@ def print_siminfo(sim_info, digits=4):
                 f"{row['beta_true']:>12.{digits}f} "
                 f"{row['abs_beta_true']:>12.{digits}f}"
             )
+
+    return "\n".join(lines)
+
+
+
+def bnn_attention(x, attention_type="self"):
+    """
+    Parameter-free attention used by both simulator and decoder.
+
+    x shape:
+        n x d
+
+    returns:
+        n x d
+    """
+
+    if attention_type == "self":
+        scale = math.sqrt(float(x.shape[-1]))
+        score = x @ x.T / scale
+        weight = torch.softmax(score, dim=-1)
+        return weight @ x
+
+    if attention_type == "feature":
+        weight = torch.softmax(x, dim=-1)
+        return weight * x
+
+    if attention_type == "identity":
+        return x
+
+    raise ValueError("attention_type must be self, feature, or identity.")
+
+
+def bnn_activate(x, ffn_activation="relu"):
+    if ffn_activation == "gelu":
+        return F.gelu(x)
+
+    if ffn_activation == "tanh":
+        return torch.tanh(x)
+
+    return F.relu(x)
+
+
+def bnn_truth_forward(
+    X,
+    truth,
+    n_blocks,
+    attention_type="self",
+    ffn_activation="relu",
+):
+    """
+    Forward pass for the sparse attention-FFN oracle.
+
+    Structure:
+        z0 = X E^T + e
+
+        z_{k+1}
+        =
+        z_k
+        +
+        activation(Attn_k(z_k) W1_k^T + b1_k) W2_k^T + b2_k
+
+        eta = z_K Wout^T + bout
+    """
+
+    E = truth["E"]
+    e = truth["e"]
+
+    z = X @ E.T + e
+
+    for k in range(int(n_blocks)):
+        W1 = truth[f"W1_{k}"]
+        b1 = truth[f"b1_{k}"]
+        W2 = truth[f"W2_{k}"]
+        b2 = truth[f"b2_{k}"]
+
+        att = bnn_attention(z, attention_type=attention_type)
+
+        hidden = att @ W1.T + b1
+        hidden = bnn_activate(hidden, ffn_activation=ffn_activation)
+
+        delta = hidden @ W2.T + b2
+
+        z = z + delta
+
+    signal = z @ truth["Wout"].T + truth["bout"]
+
+    if signal.shape[-1] == 1:
+        return signal[:, 0]
+
+    return signal
+
+
+def simfun_bnn(
+    n=240,
+    p=20,
+    seed=123,
+    family="gaussian",
+    sigma2=0.25,
+    layer_dims=None,
+    d_model=8,
+    n_blocks=2,
+    ffn_dims=None,
+    out_dim=1,
+    n_active=4,
+    active_idx=None,
+    n_active_state=None,
+    n_active_ff=None,
+    weight_low=0.35,
+    weight_high=0.80,
+    bias_sd=0.20,
+    bounded=None,
+    center_y=True,
+    attention_type="self",
+    ffn_activation="relu",
+    device=None,
+    dtype=torch.float32,
+):
+    """
+    Sparse attention-FFN BNN oracle simulation.
+
+    Data-generating model:
+
+        X_i ~ N(0, I_p)
+
+        z0 = X E^T + e
+
+        z_{k+1}
+        =
+        z_k
+        +
+        activation(Attn_k(z_k) W1_k^T + b1_k) W2_k^T + b2_k
+
+        eta = z_K Wout^T + bout
+
+    Families:
+
+        gaussian:
+            y = eta + eps, eps ~ N(0, sigma2)
+
+        bernoulli / logistic / binomial:
+            y ~ Bernoulli(sigmoid(eta))
+
+        poisson:
+            y ~ Poisson(exp(eta))
+
+    Sparse truth:
+
+        E, e,
+        W1_k, b1_k, W2_k, b2_k,
+        Wout, bout
+
+    All true parameters are ordinary tensors.
+    DSS variables s, u, t are not generated here.
+    """
+
+    if device is None:
+        device = torch.device("cpu")
+
+    rng = np.random.default_rng(seed)
+
+    if layer_dims is not None:
+        layer_dims = [int(x) for x in layer_dims]
+
+        if len(layer_dims) < 3:
+            raise ValueError("layer_dims should look like [p, d_model, out_dim].")
+
+        if int(layer_dims[0]) != int(p):
+            raise ValueError("layer_dims[0] must equal p.")
+
+        d_model = int(layer_dims[1])
+        out_dim = int(layer_dims[-1])
+
+    d_model = int(d_model)
+    n_blocks = int(n_blocks)
+    out_dim = int(out_dim)
+
+    if out_dim != 1:
+        raise ValueError("This simulator currently assumes scalar output.")
+
+    if ffn_dims is None:
+        ffn_dims = [d_model for _ in range(n_blocks)]
+    elif isinstance(ffn_dims, int):
+        ffn_dims = [int(ffn_dims) for _ in range(n_blocks)]
+    else:
+        ffn_dims = [int(x) for x in ffn_dims]
+
+    if len(ffn_dims) != n_blocks:
+        raise ValueError("ffn_dims must have length n_blocks.")
+
+    if n_active > p:
+        raise ValueError("n_active cannot exceed p.")
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed))
+
+    # -----------------------------
+    # 1. Gaussian design
+    # -----------------------------
+
+    X = torch.randn(n, p, generator=gen, device=device, dtype=dtype)
+
+    X = X - X.mean(dim=0, keepdim=True)
+    X = X / (X.std(dim=0, unbiased=False, keepdim=True) + 1e-12)
+
+    # -----------------------------
+    # 2. Sparse supports
+    # -----------------------------
+
+    if active_idx is None:
+        active_idx = np.sort(rng.choice(p, size=n_active, replace=False))
+    else:
+        active_idx = np.sort(np.asarray(active_idx, dtype=int))
+        n_active = len(active_idx)
+
+    if n_active_state is None:
+        n_active_state = min(max(n_active, 2), d_model)
+    else:
+        n_active_state = int(n_active_state)
+
+    active_state = np.sort(
+        rng.choice(d_model, size=min(n_active_state, d_model), replace=False)
+    )
+
+    active_ff = []
+
+    for dff in ffn_dims:
+        if n_active_ff is None:
+            n_ff = min(max(len(active_state), 2), dff)
+        else:
+            n_ff = min(int(n_active_ff), dff)
+
+        active_ff.append(
+            np.sort(rng.choice(dff, size=n_ff, replace=False))
+        )
+
+    # -----------------------------
+    # 3. Sparse true parameters
+    # -----------------------------
+
+    truth = {}
+
+    truth["E"] = torch.zeros(d_model, p, device=device, dtype=dtype)
+    truth["e"] = torch.zeros(d_model, device=device, dtype=dtype)
+
+    for k, dff in enumerate(ffn_dims):
+        truth[f"W1_{k}"] = torch.zeros(dff, d_model, device=device, dtype=dtype)
+        truth[f"b1_{k}"] = torch.zeros(dff, device=device, dtype=dtype)
+
+        truth[f"W2_{k}"] = torch.zeros(d_model, dff, device=device, dtype=dtype)
+        truth[f"b2_{k}"] = torch.zeros(d_model, device=device, dtype=dtype)
+
+    truth["Wout"] = torch.zeros(out_dim, d_model, device=device, dtype=dtype)
+    truth["bout"] = torch.zeros(out_dim, device=device, dtype=dtype)
+
+    def put(M, rows, cols, low, high, density=1.0):
+        for r in rows:
+            for c in cols:
+                if rng.random() <= density:
+                    val = low + (high - low) * rng.random()
+                    val = -val if rng.random() < 0.5 else val
+                    M[int(r), int(c)] = float(val)
+
+    # Input embedding:
+    # active input features -> active state coordinates
+    put(
+        truth["E"],
+        rows=active_state,
+        cols=active_idx,
+        low=weight_low,
+        high=weight_high,
+    )
+
+    truth["e"][torch.as_tensor(active_state, device=device)] = (
+        bias_sd
+        * torch.randn(
+            len(active_state),
+            generator=gen,
+            device=device,
+            dtype=dtype,
+        )
+    )
+
+    # Residual attention-FFN blocks:
+    # active state -> active FFN -> active state
+    for k, dff in enumerate(ffn_dims):
+        aff = active_ff[k]
+
+        put(
+            truth[f"W1_{k}"],
+            rows=aff,
+            cols=active_state,
+            low=weight_low,
+            high=weight_high,
+        )
+
+        truth[f"b1_{k}"][torch.as_tensor(aff, device=device)] = (
+            bias_sd
+            * torch.randn(
+                len(aff),
+                generator=gen,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+        put(
+            truth[f"W2_{k}"],
+            rows=active_state,
+            cols=aff,
+            low=weight_low,
+            high=weight_high,
+        )
+
+        truth[f"b2_{k}"][torch.as_tensor(active_state, device=device)] = (
+            bias_sd
+            * torch.randn(
+                len(active_state),
+                generator=gen,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+    # Output head:
+    # active state -> scalar output
+    put(
+        truth["Wout"],
+        rows=[0],
+        cols=active_state,
+        low=weight_low,
+        high=weight_high,
+    )
+
+    truth["bout"][0] = bias_sd * torch.randn(
+        (),
+        generator=gen,
+        device=device,
+        dtype=dtype,
+    )
+
+    if bounded is not None:
+        lo, hi = float(bounded[0]), float(bounded[1])
+        for key in truth:
+            truth[key] = truth[key].clamp(lo, hi)
+
+    # -----------------------------
+    # 4. Generate outcome
+    # -----------------------------
+
+    signal = bnn_truth_forward(
+        X=X,
+        truth=truth,
+        n_blocks=n_blocks,
+        attention_type=attention_type,
+        ffn_activation=ffn_activation,
+    )
+
+    fam = str(family).lower()
+
+    if fam == "gaussian":
+        sigma = float(np.sqrt(sigma2))
+
+        eps = sigma * torch.randn(
+            n,
+            generator=gen,
+            device=device,
+            dtype=dtype,
+        )
+
+        y = signal + eps
+
+        if center_y:
+            y = y - y.mean()
+
+    elif fam in {"bernoulli", "binomial", "logistic"}:
+        prob = torch.sigmoid(signal)
+        y = torch.bernoulli(prob).to(dtype)
+
+        sigma = np.nan
+
+    elif fam == "poisson":
+        rate = torch.exp(torch.clamp(signal, min=-20.0, max=20.0))
+        y = torch.poisson(rate).to(dtype)
+
+        sigma = np.nan
+
+    else:
+        raise ValueError("family must be gaussian, bernoulli, logistic, binomial, or poisson.")
+
+    # -----------------------------
+    # 5. Truth objects and info
+    # -----------------------------
+
+    feature_true = torch.zeros(p, device=device, dtype=dtype)
+    feature_true[torch.as_tensor(active_idx, device=device)] = 1.0
+
+    support_counts = {
+        key: int((val.abs() > 1e-12).sum().item())
+        for key, val in truth.items()
+    }
+
+    n_param = int(sum(v.numel() for v in truth.values()))
+    n_nonzero = int(sum(support_counts.values()))
+    truth_density = float(n_nonzero / max(n_param, 1))
+
+    active_table = [
+        {"rank": int(i + 1), "j": int(j), "j1": int(j + 1)}
+        for i, j in enumerate(active_idx)
+    ]
+
+    signal_var = float(signal.var(unbiased=False).item())
+    outcome_var = float(y.var(unbiased=False).item())
+
+    sim_info = {
+        "sim": "attention_ffn_sparse_oracle",
+        "seed": int(seed),
+        "family": fam,
+        "n": int(n),
+        "p": int(p),
+        "n_active": int(n_active),
+        "sigma2": float(sigma2) if fam == "gaussian" else None,
+        "sigma": float(sigma) if fam == "gaussian" else None,
+        "signal_var": signal_var,
+        "outcome_var": outcome_var,
+        "input_dim": int(p),
+        "d_model": int(d_model),
+        "n_blocks": int(n_blocks),
+        "ffn_dims": [int(x) for x in ffn_dims],
+        "out_dim": int(out_dim),
+        "attention_type": attention_type,
+        "ffn_activation": ffn_activation,
+        "active_idx": active_idx,
+        "active_state": active_state,
+        "active_ff": active_ff,
+        "active_table": active_table,
+        "support_counts": support_counts,
+        "n_param": n_param,
+        "n_nonzero": n_nonzero,
+        "truth_density": truth_density,
+        "weight_low": float(weight_low),
+        "weight_high": float(weight_high),
+        "bias_sd": float(bias_sd),
+        "bounded": bounded,
+        "center_y": bool(center_y) if fam == "gaussian" else False,
+    }
+
+    if fam in {"bernoulli", "binomial", "logistic"}:
+        sim_info["prob_mean"] = float(prob.mean().item())
+        sim_info["positive_rate"] = float(y.mean().item())
+
+    if fam == "poisson":
+        sim_info["rate_mean"] = float(rate.mean().item())
+        sim_info["count_mean"] = float(y.mean().item())
+
+    return X, y, feature_true, truth, sim_info
+
+
+def print_bnn_siminfo(sim_info: Dict[str, Any], digits=4):
+    """
+    Compact simulation summary for attention-FFN sparse BNN.
+    """
+
+    if sim_info is None:
+        return "sim_info = None"
+
+    lines = ["Sparse attention-FFN BNN simulation summary:"]
+
+    keys = [
+        "sim",
+        "seed",
+        "family",
+        "n",
+        "p",
+        "n_active",
+        "sigma2",
+        "sigma",
+        "signal_var",
+        "outcome_var",
+        "prob_mean",
+        "positive_rate",
+        "rate_mean",
+        "count_mean",
+        "input_dim",
+        "d_model",
+        "n_blocks",
+        "ffn_dims",
+        "out_dim",
+        "attention_type",
+        "ffn_activation",
+        "bounded",
+        "center_y",
+        "n_param",
+        "n_nonzero",
+        "truth_density",
+    ]
+
+    for key in keys:
+        if key in sim_info and sim_info[key] is not None:
+            val = sim_info[key]
+
+            if isinstance(val, float):
+                lines.append(f"  {key:<22}: {val:.{digits}f}")
+            else:
+                lines.append(f"  {key:<22}: {val}")
+
+    lines.append("")
+    lines.append("Active input features, zero-based:")
+    lines.append(f"  {np.asarray(sim_info['active_idx']).tolist()}")
+
+    lines.append("")
+    lines.append("Active state coordinates:")
+    lines.append(f"  active_state : {np.asarray(sim_info['active_state']).tolist()}")
+
+    lines.append("")
+    lines.append("Active FFN units by residual block:")
+
+    for k, aff in enumerate(sim_info["active_ff"]):
+        lines.append(f"  block {k:<3}: {np.asarray(aff).tolist()}")
+
+    lines.append("")
+    lines.append("True nonzero counts:")
+
+    for key, val in sim_info["support_counts"].items():
+        lines.append(f"  {key:<8}: {int(val)}")
 
     return "\n".join(lines)

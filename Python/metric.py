@@ -96,18 +96,28 @@ def selection_metrics_from_support(
 
 def ranking_metrics(*, support_score, beta_true=None, active_idx=None, p=None) -> Dict[str, float]:
     score = np.asarray(support_score, dtype=float)
+
     if beta_true is not None:
         truth = (np.abs(np.asarray(beta_true, dtype=float)) > 1e-12).astype(int)
     else:
         truth = np.zeros(int(p or len(score)), dtype=int)
         if active_idx is not None:
             truth[np.asarray(active_idx, dtype=int)] = 1
-    if len(np.unique(truth)) < 2:
-        return {"auroc": np.nan, "auprc": np.nan}
-    return {
-        "auroc": float(roc_auc_score(truth, score)),
-        "auprc": float(average_precision_score(truth, score)),
+
+    prob = np.clip(score, 0.0, 1.0)
+
+    out = {
+        "br": float(np.mean((truth - prob) ** 2)),
     }
+
+    if len(np.unique(truth)) < 2:
+        out["auroc"] = np.nan
+        out["auprc"] = np.nan
+    else:
+        out["auroc"] = float(roc_auc_score(truth, score))
+        out["auprc"] = float(average_precision_score(truth, score))
+
+    return out
 
 
 def predictive_metrics(X, y, beta_hard_samples, sigma2: Optional[float] = None, family: str = "gaussian") -> Dict[str, float]:
@@ -115,7 +125,9 @@ def predictive_metrics(X, y, beta_hard_samples, sigma2: Optional[float] = None, 
     X = _tensor(X)
     y = _tensor(y).view(-1)
     B = _tensor(beta_hard_samples)
+
     eta = X @ B.T
+
     if family == "gaussian":
         pred = eta
     elif family == "poisson":
@@ -124,20 +136,24 @@ def predictive_metrics(X, y, beta_hard_samples, sigma2: Optional[float] = None, 
         pred = torch.sigmoid(eta)
     else:
         raise ValueError(f"Unknown family: {family}")
+
     yhat = pred.mean(dim=1)
     resid = y - yhat
     mse = resid.pow(2).mean().item()
+
     out = {
         "mse": float(mse),
         "rmse": float(mse ** 0.5),
-        "mae": float(resid.abs().mean().item()),
+        "normalized_l1": float(resid.abs().sum().item() / (y.abs().sum().item() + 1e-12)),
         "r2": float(1.0 - resid.pow(2).sum().item() / ((y - y.mean()).pow(2).sum().item() + 1e-12)),
     }
+
     if family == "gaussian" and sigma2 is not None:
         s2 = max(float(sigma2), 1e-12)
         ll = -0.5 * (((y[:, None] - eta) ** 2) / s2 + math.log(2.0 * math.pi * s2))
         out["heldout_loglik"] = torch.logsumexp(ll, dim=1).sub(math.log(eta.shape[1])).mean().item()
         out["nll"] = -out["heldout_loglik"]
+
     return out
 
 
@@ -193,34 +209,83 @@ def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int
     beta_ref = np.asarray(mcmc_ref["beta"], dtype=float)
     pip_ref = np.asarray(mcmc_ref["pip"], dtype=float)
     beta_true = _vec(beta_true)
+
     active_idx = np.flatnonzero(np.abs(beta_true) > 1e-12)
     zero_idx = np.flatnonzero(np.abs(beta_true) <= 1e-12)
+    truth = (np.abs(beta_true) > 1e-12).astype(int)
+
     pip = active_last.mean(axis=0)
+    pip_diff = pip - pip_ref
+    pip_absdiff = np.abs(pip_diff)
 
     active_skl = [kde_skl_1d(beta_last[:, j], beta_ref[:, j]) for j in active_idx]
     joint_skl = [kde_skl_2d(beta_last[:, [j, k]], beta_ref[:, [j, k]]) for j, k in _active_pairs(beta_true, max_pairs)]
+
     zero_js = [bernoulli_js(pip[j], pip_ref[j]) for j in zero_idx]
     pip_js = [bernoulli_js(pip[j], pip_ref[j]) for j in active_idx]
     all_pip_js = [bernoulli_js(pip[j], pip_ref[j]) for j in range(len(pip))]
 
+    br_last = float(np.mean((truth - pip) ** 2))
+    br_mcmc = float(np.mean((truth - pip_ref) ** 2))
+    br_rel = float(br_last / (br_mcmc + 1e-12))
+
+    if len(np.unique(truth)) < 2:
+        auroc_last = np.nan
+        auprc_last = np.nan
+        auroc_mcmc = np.nan
+        auprc_mcmc = np.nan
+    else:
+        auroc_last = float(roc_auc_score(truth, pip))
+        auprc_last = float(average_precision_score(truth, pip))
+        auroc_mcmc = float(roc_auc_score(truth, pip_ref))
+        auprc_mcmc = float(average_precision_score(truth, pip_ref))
+
     out = {
         "joint_skl_median": float(np.nanmedian(joint_skl)) if joint_skl else np.nan,
         "joint_skl_mean": float(np.nanmean(joint_skl)) if joint_skl else np.nan,
+
         "active_marg_skl_median": float(np.nanmedian(active_skl)) if active_skl else np.nan,
         "active_marg_skl_mean": float(np.nanmean(active_skl)) if active_skl else np.nan,
+
         "zero_js_median": float(np.nanmedian(zero_js)) if zero_js else np.nan,
         "zero_js_mean": float(np.nanmean(zero_js)) if zero_js else np.nan,
+
         "pip_js_median": float(np.nanmedian(pip_js)) if pip_js else np.nan,
         "pip_js_mean": float(np.nanmean(pip_js)) if pip_js else np.nan,
         "all_pip_js_median": float(np.nanmedian(all_pip_js)),
-        "pip_absdiff_median": float(np.nanmedian(np.abs(pip - pip_ref))),
-        "pip_absdiff_mean": float(np.nanmean(np.abs(pip - pip_ref))),
+        "all_pip_js_mean": float(np.nanmean(all_pip_js)),
+
+        "pip_l1_sum": float(np.sum(pip_absdiff)),
+        "pip_l1_mean": float(np.mean(pip_absdiff)),
+        "pip_rmse": float(np.sqrt(np.mean(pip_diff ** 2))),
+
+        "pip_l1_active_mean": float(np.mean(pip_absdiff[active_idx])) if len(active_idx) else np.nan,
+        "pip_rmse_active": float(np.sqrt(np.mean(pip_diff[active_idx] ** 2))) if len(active_idx) else np.nan,
+
+        "pip_l1_zero_mean": float(np.mean(pip_absdiff[zero_idx])) if len(zero_idx) else np.nan,
+        "pip_rmse_zero": float(np.sqrt(np.mean(pip_diff[zero_idx] ** 2))) if len(zero_idx) else np.nan,
+
+        "pip_absdiff_median": float(np.nanmedian(pip_absdiff)),
+        "pip_absdiff_mean": float(np.nanmean(pip_absdiff)),
+
+        "br_last": br_last,
+        "br_mcmc": br_mcmc,
+        "br_rel": br_rel,
+
+        "auroc_last": auroc_last,
+        "auprc_last": auprc_last,
+        "auroc_mcmc": auroc_mcmc,
+        "auprc_mcmc": auprc_mcmc,
+
         "expected_support": float(pip.sum()),
+        "mcmc_expected_support": float(pip_ref.sum()),
     }
+
     out.update({
         "active_joint_skl_median": out["joint_skl_median"],
         "active_joint_skl_mean": out["joint_skl_mean"],
     })
+
     return out
 
 

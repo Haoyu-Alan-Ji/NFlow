@@ -559,6 +559,9 @@ def simflow_stagewise(
     compare_mcmc=True,
     mcmc_during_training=False,
 ):
+
+    t_total_start = time.time()
+
     set_all_seeds(seed, deterministic=False)
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sim_info = sim_info or {}
@@ -663,6 +666,8 @@ def simflow_stagewise(
         mcmc_ref=mcmc_ref,
     )
 
+    total_runtime_sec = time.time() - t_total_start
+
     out = {
         "method": method_name,
         "seed": seed,
@@ -673,6 +678,8 @@ def simflow_stagewise(
         "splits": splits,
         "beta_true": beta_true,
         "model": model,
+        "train_runtime_min": float(train_out["runtime_sec"] / 60.0),
+        "total_runtime_min": float(total_runtime_sec / 60.0),
         **train_out,
         "final": final,
     }
@@ -682,6 +689,8 @@ def simflow_stagewise(
         "experiment_group": experiment_group,
         "experiment_name": experiment_name,
         "environment_name": environment_name,
+        "train_runtime_min": float(train_out["runtime_sec"] / 60.0),
+        "total_runtime_min": float(total_runtime_sec / 60.0),
     })
     save_run_artifacts(out, save_cfg)
     if show_final:
