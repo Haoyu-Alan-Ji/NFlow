@@ -24,7 +24,7 @@ from .utils import (
     set_optimizer_lr,
 )
 from .config import StagewiseAnnealConfig, SplitConfig, SaveConfig
-from .model2 import build_flow_vi
+from .model import build_flow_vi
 from .metric import (
     sample_posterior_latents,
     hard_support_from_draws,

@@ -1,0 +1,19 @@
+# Full local simulation data
+data/
+
+# Keep aggregated results under version control
+!results/
+
+# Archives and logs
+*.tgz
+*.tar.gz
+*.out
+*.err
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/

@@ -13,9 +13,11 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import Python.framework as fw
 import Python.config as cfg
@@ -23,7 +25,7 @@ import Python.config as cfg
 
 def rpath(x):
     x = Path(x)
-    return x if x.is_absolute() else ROOT / x
+    return x if x.is_absolute() else PROJECT_ROOT / x
 
 
 def read_job(manifest_path, row_id):
@@ -86,6 +88,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("manifest")
     p.add_argument("row_id", type=int)
+    p.add_argument("--config-name", default="last_default")
     p.add_argument("--output-root", default="data/n160p100_last_output")
     p.add_argument("--mcmc-root", default="data")
     p.add_argument("--train-seed", type=int, default=None)
@@ -93,12 +96,13 @@ def parse_args():
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
 
     p.add_argument("--beta-mode", default="sigmoid", choices=["sigmoid", "relu", "group_relu"])
-    p.add_argument("--coupling-type", default="semantic", choices=["meanfield", "affine", "semantic"])
+    p.add_argument("--coupling-type", default="semantic", choices=["meanfield", "affine", "semantic", "semantic_affine_control"])
     p.add_argument("--conditioner-type", default="mlp", choices=["mlp", "resnet"])
     p.add_argument("--hidden-units", type=int, default=64)
     p.add_argument("--num-hidden-layers", type=int, default=2)
     p.add_argument("--K-q", type=int, default=32)
     p.add_argument("--K-g", type=int, default=8)
+    p.add_argument("--affine-layers-per-step", type=int, default=3)
 
     p.add_argument("--tau-start", type=float, default=0.5)
     p.add_argument("--tau-end", type=float, default=0.1)
@@ -121,23 +125,41 @@ def parse_args():
 
 def main():
     args = parse_args()
-    device = torch.device("cpu" if args.device == "cpu" else "cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    elif args.device == "cuda":
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     job = read_job(args.manifest, args.row_id)
     X, y, beta_true, sim_info = read_data(job, device)
+    sim_info["config_name"] = args.config_name
 
     out_dir = rpath(args.output_root) / str(job["setting"]) / f"seed_{int(job['seed'])}"
     schedule = make_schedule(args)
-    split = cfg.SplitConfig(train_frac=0.6, val_frac=0.2, test_frac=0.2, seed=args.split_seed)
+
+    try:
+        split = cfg.SplitConfig(train_frac=0.6, val_frac=0.2, test_frac=0.2, seed=args.split_seed)
+    except TypeError:
+        split = cfg.SplitConfig(train_frac=0.6, val_frac=0.2, test_frac=0.2, seed=args.split_seed)
+
     save = cfg.SaveConfig(output_dir=str(out_dir))
     train_seed = int(job["seed"]) if args.train_seed is None else int(args.train_seed)
 
+    print("[info] project_root:", PROJECT_ROOT)
     print("[info] method: LaST-Flow")
+    print("[info] config_name:", args.config_name)
     print("[info] row_id:", args.row_id)
     print("[info] setting:", job["setting"])
     print("[info] seed:", int(job["seed"]))
     print("[info] split_seed:", args.split_seed)
     print("[info] device:", device)
+    print("[info] data_path:", rpath(job["data_path"]))
+    print("[info] beta_path:", rpath(job["beta_path"]))
     print("[info] out_dir:", out_dir)
+    print("[info] mcmc_root:", rpath(args.mcmc_root))
 
     fw.simflow_stagewise(
         X=X,
@@ -165,6 +187,7 @@ def main():
         compare_mcmc=True,
         mcmc_during_training=args.mcmc_during_training,
     )
+
     print("[done] completed")
 
 

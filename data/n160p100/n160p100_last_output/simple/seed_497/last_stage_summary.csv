@@ -1,3 +1,0 @@
-stage,tau,best_ckpt_id,best_epoch,best_val_mse,best_support_size,n_evals,best_lasso_recovery_score
-0,0.8,12,300,1.9267683029174805,8,13,1.9933676197070962
-1,0.8,30,725,2.0501034259796143,7,49,0.7970807156689588

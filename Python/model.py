@@ -251,6 +251,7 @@ class Flow(nn.Module):
         self.coupling_type = coupling_type
 
         layers = []
+
         if coupling_type == "semantic":
             for _ in range(int(K)):
                 for mode in ("s", "u", "t"):
@@ -263,6 +264,38 @@ class Flow(nn.Module):
                         scale_clip,
                         conditioner_type,
                     ))
+
+        elif coupling_type == "semantic_affine_control":
+            s_mid = self.s_dim // 2
+            u_mid = self.u_dim // 2
+            s_start = 0
+            s_end = self.s_dim
+            u_start = self.s_dim
+            u_end = self.s_dim + self.u_dim
+            t_start = self.s_dim + self.u_dim
+            t_end = self.dim
+
+            blocks = [
+                torch.arange(s_start, s_start + s_mid),
+                torch.arange(s_start + s_mid, s_end),
+                torch.arange(u_start, u_start + u_mid),
+                torch.arange(u_start + u_mid, u_end),
+                torch.arange(t_start, t_end),
+            ]
+
+            for _ in range(int(K)):
+                for block in blocks:
+                    mask = torch.ones(self.dim, dtype=torch.bool)
+                    mask[block] = False
+                    layers.append(Affine(
+                        self.dim,
+                        mask,
+                        hidden_units,
+                        num_hidden_layers,
+                        scale_clip,
+                        conditioner_type,
+                    ))
+
         elif coupling_type == "affine":
             for k in range(int(K) * int(affine_layers_per_step)):
                 mask = (torch.arange(self.dim) + k) % 2 == 0
@@ -274,6 +307,7 @@ class Flow(nn.Module):
                     scale_clip,
                     conditioner_type,
                 ))
+
         elif coupling_type != "meanfield":
             raise ValueError(f"Unknown coupling_type: {coupling_type}")
 
