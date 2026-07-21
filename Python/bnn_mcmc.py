@@ -8,9 +8,7 @@ def run_bnn_mcmc(
     decoder,
     X,
     y,
-    family="gaussian",
-    sigma2=1.0,
-    truth=None,
+    sim_info,
     N=2000,
     S_max=100,
     burnin=500,
@@ -20,16 +18,19 @@ def run_bnn_mcmc(
     print_every=100,
 ):
     """
-    ESS-within-Gibbs MCMC reference for DSSAttentionFFNDecoder.
+    Coordinate-wise ESS MCMC reference for DSSAttentionFFNDecoder.
 
-    Samples semantic coordinates xi = (s, u, t), then decodes
-    theta = D(xi).
+    Samples semantic coordinates:
+        xi = (s, u, t)
 
-    Works with decoder.param_specs and truth keys:
-        E, e,
-        W1_0, b1_0, W2_0, b2_0,
-        ...
-        Wout, bout.
+    The decoder handles the complete mapping:
+        xi -> theta -> prediction
+
+    PIP:
+        Pr(u > t | data)
+
+    ePIP:
+        Pr(|theta| > beta_eps | data)
     """
 
     rng = np.random.default_rng(seed)
@@ -38,49 +39,14 @@ def run_bnn_mcmc(
     dtype = X.dtype
     d = decoder.dim
 
-    fam = str(family).lower()
+    fam = str(sim_info["family"]).lower()
+    sigma2 = float(sim_info["sigma2"]) if fam == "gaussian" else None
 
     # -----------------------------
-    # 1. Initial xi
+    # 1. Initial semantic state
     # -----------------------------
 
-    xi0 = torch.zeros(d, device=device, dtype=dtype)
-
-    if truth is not None:
-        theta0_parts = []
-        lambda_parts = []
-
-        for item in decoder.param_specs:
-            key = item["name"]
-
-            if key not in truth:
-                raise KeyError(f"truth is missing key: {key}")
-
-            val = truth[key].detach().to(device=device, dtype=dtype).reshape(-1)
-
-            theta0_parts.append(val)
-            lambda_parts.append(torch.full_like(val, float(item["lambda"])))
-
-        theta0 = torch.cat(theta0_parts)
-        lambda_flat = torch.cat(lambda_parts)
-
-        s0 = xi0[:decoder.s_dim]
-        u0 = xi0[decoder.s_dim:decoder.s_dim + decoder.u_dim]
-        t0 = xi0[decoder.s_dim + decoder.u_dim:]
-
-        active = theta0.abs() > 1e-12
-
-        t0.zero_()
-
-        # Since theta = lambda * s * relu(u - t),
-        # setting t=0, u=1 for active gives theta = lambda * s.
-        u0[active] = 1.0
-        u0[~active] = -1.0
-
-        s0[active] = theta0[active] / lambda_flat[active]
-        s0[~active] = 0.0
-
-    b_c = xi0.detach().cpu().numpy().astype(float)
+    b_c = np.zeros(d, dtype=float)
 
     # -----------------------------
     # 2. Log likelihood
@@ -88,15 +54,20 @@ def run_bnn_mcmc(
 
     @torch.no_grad()
     def LL(b):
-        xi = torch.as_tensor(b, device=device, dtype=dtype)[None, :]
+        xi = torch.as_tensor(
+            b,
+            device=device,
+            dtype=dtype,
+        )[None, :]
+
         pred = decoder(X=X, xi=xi)[0]
 
         if fam == "gaussian":
             resid = y - pred
 
             out = -0.5 * (
-                resid.pow(2).sum() / float(sigma2)
-                + y.numel() * math.log(2.0 * math.pi * float(sigma2))
+                resid.square().sum() / sigma2
+                + y.numel() * math.log(2.0 * math.pi * sigma2)
             )
 
             return float(out.item())
@@ -112,7 +83,9 @@ def run_bnn_mcmc(
 
         if fam == "poisson":
             log_rate = pred
-            rate = torch.exp(torch.clamp(log_rate, min=-20.0, max=20.0))
+            rate = torch.exp(
+                torch.clamp(log_rate, min=-20.0, max=20.0)
+            )
 
             out = (
                 y * log_rate
@@ -122,10 +95,13 @@ def run_bnn_mcmc(
 
             return float(out.item())
 
-        raise ValueError("family must be gaussian, bernoulli, logistic, binomial, or poisson.")
+        raise ValueError(
+            "family must be gaussian, bernoulli, logistic, "
+            "binomial, or poisson."
+        )
 
     # -----------------------------
-    # 3. ESS-within-Gibbs
+    # 3. Coordinate-wise ESS
     # -----------------------------
 
     sd_0 = np.ones(d, dtype=float)
@@ -133,40 +109,53 @@ def run_bnn_mcmc(
     mc_b = np.full((N, d), np.nan, dtype=float)
     n_s = np.full((N, d), np.nan, dtype=float)
 
+    ll_c = LL(b_c)
+
     for i in range(N):
         for j in range(d):
-            ns = 0
-
-            level = LL(b_c) + math.log(rng.uniform())
+            level = ll_c + math.log(rng.uniform())
 
             th = rng.uniform(0.0, 2.0 * math.pi)
-            a = th - 2.0 * math.pi
-            A = th
+            lower = th - 2.0 * math.pi
+            upper = th
 
             nu = rng.normal(0.0, sd_0[j])
             b_p = b_c.copy()
 
-            while ns < S_max:
-                b_p[j] = b_c[j] * math.cos(th) + nu * math.sin(th)
-                ns += 1
+            ns = 0
 
-                if LL(b_p) > level:
+            while ns < S_max:
+                b_p[j] = (
+                    b_c[j] * math.cos(th)
+                    + nu * math.sin(th)
+                )
+
+                ns += 1
+                ll_p = LL(b_p)
+
+                if ll_p > level:
                     b_c = b_p.copy()
+                    ll_c = ll_p
                     break
 
-                if th < 0:
-                    a = th
+                if th < 0.0:
+                    lower = th
                 else:
-                    A = th
+                    upper = th
 
-                th = rng.uniform(a, A)
+                th = rng.uniform(lower, upper)
 
             n_s[i, j] = ns
 
-        mc_b[i, :] = b_c
+        mc_b[i] = b_c
 
-        if print_every is not None and ((i + 1) % print_every == 0 or i == 0):
-            print(f"mcmc_iter={i + 1:05d} loglik={LL(b_c):.3f}")
+        if print_every is not None and (
+            (i + 1) % print_every == 0 or i == 0
+        ):
+            print(
+                f"mcmc_iter={i + 1:05d} "
+                f"loglik={ll_c:.3f}"
+            )
 
     # -----------------------------
     # 4. Keep posterior draws
@@ -174,59 +163,132 @@ def run_bnn_mcmc(
 
     keep = np.arange(burnin, N, thin)
 
-    xi_draws_np = mc_b[keep, :]
-    xi_draws = torch.as_tensor(xi_draws_np, device=device, dtype=dtype)
+    xi_draws_np = mc_b[keep]
+    xi_draws = torch.as_tensor(
+        xi_draws_np,
+        device=device,
+        dtype=dtype,
+    )
+
+    R = xi_draws.shape[0]
 
     # -----------------------------
-    # 5. Decode xi draws to theta draws
+    # 5. Decode semantic draws
     # -----------------------------
 
     with torch.no_grad():
-        params = decoder.unpack(xi_draws, return_summary=False)
+        params = decoder.unpack(
+            xi_draws,
+            return_summary=False,
+        )
 
-        theta_parts = []
-        theta_names = []
+    theta_parts = []
+    theta_names = []
 
-        for item in decoder.param_specs:
-            key = item["name"]
+    active_parts = []
 
-            val = params[key].reshape(xi_draws.shape[0], -1)
+    u = xi_draws[
+        :,
+        decoder.s_dim:
+        decoder.s_dim + decoder.u_dim,
+    ]
 
-            theta_parts.append(val.detach().cpu())
+    t = xi_draws[
+        :,
+        decoder.s_dim + decoder.u_dim:,
+    ]
 
-            for local_id in range(val.shape[1]):
-                theta_names.append(f"{key}_{local_id}")
+    for item in decoder.param_specs:
+        key = item["name"]
+        sl = slice(item["start"], item["end"])
 
-        theta_draws = torch.cat(theta_parts, dim=1).numpy()
+        value = params[key].reshape(R, -1)
+        theta_parts.append(value.detach().cpu())
+
+        margin = (
+            u[:, sl]
+            - t[:, item["t"]:item["t"] + 1]
+        )
+
+        active_parts.append(
+            (margin > 0.0).detach().cpu()
+        )
+
+        for local_id in range(value.shape[1]):
+            theta_names.append(f"{key}_{local_id}")
+
+    theta_draws = torch.cat(
+        theta_parts,
+        dim=1,
+    ).numpy()
+
+    active_draw = torch.cat(
+        active_parts,
+        dim=1,
+    ).numpy()
 
     # -----------------------------
-    # 6. Practical inclusion summaries
+    # 6. Posterior summaries
     # -----------------------------
-
-    active_draw = np.abs(theta_draws) > float(beta_eps)
 
     pip = active_draw.mean(axis=0)
     selected = (pip > 0.5).astype(int)
 
+    effect_active_draw = (
+        np.abs(theta_draws) > float(beta_eps)
+    )
+
+    epip = effect_active_draw.mean(axis=0)
+    effect_selected = (epip > 0.5).astype(int)
+
     effect_mean = theta_draws.mean(axis=0)
     effect_sd = theta_draws.std(axis=0, ddof=1)
+
+    t_draws = xi_draws_np[
+        :,
+        decoder.s_dim + decoder.u_dim:,
+    ]
+
+    threshold_names = [
+        f"t_{item['name']}"
+        for item in decoder.param_specs
+    ]
 
     out = {
         "xi_draws": xi_draws_np,
         "theta_draws": theta_draws,
         "theta_names": theta_names,
+
+        "active_draw": active_draw,
         "pip": pip,
         "selected": selected,
+
+        "effect_active_draw": effect_active_draw,
+        "epip": epip,
+        "effect_selected": effect_selected,
+
         "effect_mean": effect_mean,
         "effect_sd": effect_sd,
-        "active_draw": active_draw,
+
+        "t_draws": t_draws,
+        "threshold_names": threshold_names,
+        "threshold_mean": t_draws.mean(axis=0),
+        "threshold_sd": t_draws.std(axis=0, ddof=1),
+
         "n_s": n_s,
         "beta_eps": float(beta_eps),
         "burnin": int(burnin),
         "thin": int(thin),
-        "n_kept": int(theta_draws.shape[0]),
+        "n_kept": int(R),
+
         "family": fam,
-        "sigma2": float(sigma2) if fam == "gaussian" else None,
+        "sigma2": sigma2,
+
+        "sim_info": sim_info,
+        "function": sim_info["function"],
+        "snr": float(sim_info["snr"]),
+        "active_idx": sim_info["active_idx"],
+        "n_active": int(sim_info["n_active"]),
     }
 
     return out
