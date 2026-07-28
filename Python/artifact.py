@@ -111,7 +111,9 @@ def save_run_artifacts(out: Mapping[str, Any], save_cfg: SaveConfig) -> None:
             meta = checkpoints[selected_ckpt_id].get("meta", {})
         write_json(outdir / "final_summary.json", {
             "selected_ckpt_id": selected_ckpt_id,
-            "runtime_sec": out.get("runtime_sec"),
+            "runtime_sec": out.get("total_runtime_sec", out.get("runtime_sec")),
+            "train_runtime_sec": out.get("train_runtime_sec", out.get("runtime_sec")),
+            "total_runtime_sec": out.get("total_runtime_sec", out.get("runtime_sec")),
             "stage_summaries": out.get("stage_summaries", []),
             "checkpoint_meta": meta,
             "selection_metrics": final.get("selection_metrics", {}),

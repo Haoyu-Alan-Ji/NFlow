@@ -386,8 +386,10 @@ class RelaxedSAS(nn.Module):
             gate = torch.sigmoid(margin / self.tau)
             active = (margin > 0).to(gate.dtype)
             beta = s * gate
+            beta_hard = s * active
             return {"eps": z, "xi": xi, "s": s, "u": u, "t": t, "margin": margin,
-                    "gate": gate, "active": active, "beta": beta}
+                    "gate": gate, "active": active, "beta": beta,
+                    "beta_hard": beta_hard}
 
         if self.beta_mode == "relu":
             margin = u - t
@@ -395,7 +397,8 @@ class RelaxedSAS(nn.Module):
             active = (margin > 0).to(gate.dtype)
             beta = s * gate
             return {"eps": z, "xi": xi, "s": s, "u": u, "t": t, "margin": margin,
-                    "gate": gate, "active": active, "beta": beta}
+                    "gate": gate, "active": active, "beta": beta,
+                    "beta_hard": beta}
 
         group_margin = u - t
         group_gate = F.relu(group_margin)
@@ -407,7 +410,7 @@ class RelaxedSAS(nn.Module):
         return {"eps": z, "xi": xi, "s": s, "u": u, "t": t, "margin": margin,
                 "gate": gate, "active": active, "group_margin": group_margin,
                 "group_gate": group_gate, "group_active": group_active,
-                "group_ids": self.group_ids, "beta": beta}
+                "group_ids": self.group_ids, "beta": beta, "beta_hard": beta}
 
     def log_joint(self, z):
         beta = self.decode(z)["beta"]
@@ -512,8 +515,14 @@ def build_flow_vi(
         device=X.device,
     )
 
+    K_q = int(K_q)
+    K_g = int(K_g)
+    if K_q < 1 or K_g < 1:
+        raise ValueError("K_q and K_g must both be positive; the single-flow depth is K_q + K_g.")
     if K_flow is None:
-        K_flow = int(K_q) + int(K_g)
+        K_flow = K_q + K_g
+    elif int(K_flow) != K_q + K_g:
+        raise ValueError("K_flow must equal K_q + K_g.")
 
     q0 = NBase(dim=dim, init_loc=0.0, init_log_scale=-2.5)
 

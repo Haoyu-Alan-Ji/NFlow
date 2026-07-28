@@ -221,7 +221,7 @@ def evaluate_checkpoint(
 
     if mcmc_during_training and mcmc_ref is not None and beta_true is not None:
         rec.update(recovery_metrics(
-            beta_last=to_numpy(draws["beta"]),
+            beta_last=to_numpy(hard["beta_hard_samples"]),
             active_last=to_numpy(draws["active"]),
             beta_true=beta_true,
             mcmc_ref=mcmc_ref,
@@ -450,10 +450,12 @@ def finalize_selected_checkpoint(
     test_metrics = predictive_metrics(X_test, y_test, hard["beta_hard_samples"], sigma2=sigma2, family=family)
     selection_metrics = selection_metrics_from_support(hard["support_idx"], beta_true=beta_true)
 
-    beta = draws["beta"]
+    beta_relaxed = draws["beta"]
+    beta_hard = hard["beta_hard_samples"]
     gate = draws.get("gate", draws.get("active"))
-    active = draws.get("active", (beta.abs() > 1e-12).float())
-    beta_np = to_numpy(beta)
+    active = draws.get("active", (beta_hard.abs() > 1e-12).float())
+    beta_np = to_numpy(beta_hard)
+    beta_relaxed_np = to_numpy(beta_relaxed)
     gate_np = to_numpy(gate)
     active_np = to_numpy(active)
     p = beta_np.shape[1]
@@ -462,6 +464,8 @@ def finalize_selected_checkpoint(
         "j": np.arange(p),
         "beta_mean": beta_np.mean(axis=0),
         "beta_sd": beta_np.std(axis=0, ddof=1),
+        "beta_relaxed_mean": beta_relaxed_np.mean(axis=0),
+        "beta_relaxed_sd": beta_relaxed_np.std(axis=0, ddof=1),
         "gate_mean": gate_np.mean(axis=0),
         "gate_sd": gate_np.std(axis=0, ddof=1),
         "pip": active_np.mean(axis=0),
@@ -517,7 +521,9 @@ def finalize_selected_checkpoint(
         "pred_table": pred_table,
         "tau_selected": tau_selected,
         "selected_ckpt_meta": meta,
-        "beta_samples": beta,
+        "beta_samples": beta_hard,
+        "beta_hard_samples": beta_hard,
+        "beta_relaxed_samples": beta_relaxed,
         "active_samples": active,
         "gate_samples": gate,
     }
@@ -580,7 +586,18 @@ def simflow_stagewise(
     if compare_mcmc:
         mcmc_ref, mcmc_info = read_mcmc_ref_auto(mcmc_root, sim_info, mcmc_setting, mcmc_seed)
 
-    K_total = int(K_q) + int(K_g)
+    K_q = int(K_q)
+    K_g = int(K_g)
+    if K_q < 1 or K_g < 1:
+        raise ValueError("K_q and K_g must both be positive; the single-flow depth is K_q + K_g.")
+    K_total = K_q + K_g
+    effective_layers = 0 if coupling_type == "meanfield" else K_total
+    transforms_per_layer = {
+        "meanfield": 0,
+        "semantic": 3,
+        "affine": int(affine_layers_per_step),
+        "semantic_affine_control": 5,
+    }[coupling_type]
     method_name = method_name or f"{coupling_type}_{conditioner_type}"
     experiment_name = experiment_name or method_name
     model_config = {
@@ -593,12 +610,16 @@ def simflow_stagewise(
         "num_hidden_layers": int(num_hidden_layers),
         "scale_clip": float(scale_clip),
         "affine_layers_per_step": int(affine_layers_per_step),
-        "K_q": int(K_q),
-        "K_g": int(K_g),
-        "reported_layers": K_total,
+        "K_q": K_q,
+        "K_g": K_g,
+        "K_flow": effective_layers,
+        "requested_layer_sum": K_total,
+        "reported_layers": effective_layers,
+        "transforms_per_layer": transforms_per_layer,
+        "total_coupling_transforms": effective_layers * transforms_per_layer,
         "reported_structure": "single_flow",
-        "implementation_structure": "double_flow",
-        "structure_note": "Training keeps posterior_flow and g_theta; reporting uses one flow depth K_q + K_g.",
+        "implementation_structure": "single_flow",
+        "structure_note": "K_q and K_g are retained as positive compatibility fields; only their sum sets posterior-flow depth.",
     }
     run_manifest = {
         "experiment_group": experiment_group,
@@ -678,9 +699,11 @@ def simflow_stagewise(
         "splits": splits,
         "beta_true": beta_true,
         "model": model,
+        **train_out,
+        "train_runtime_sec": float(train_out["runtime_sec"]),
+        "total_runtime_sec": float(total_runtime_sec),
         "train_runtime_min": float(train_out["runtime_sec"] / 60.0),
         "total_runtime_min": float(total_runtime_sec / 60.0),
-        **train_out,
         "final": final,
     }
     out["summary_row"] = flow_row_from_result(out)
@@ -689,6 +712,8 @@ def simflow_stagewise(
         "experiment_group": experiment_group,
         "experiment_name": experiment_name,
         "environment_name": environment_name,
+        "train_runtime_sec": float(train_out["runtime_sec"]),
+        "total_runtime_sec": float(total_runtime_sec),
         "train_runtime_min": float(train_out["runtime_sec"] / 60.0),
         "total_runtime_min": float(total_runtime_sec / 60.0),
     })

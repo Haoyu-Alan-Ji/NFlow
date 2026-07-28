@@ -88,9 +88,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("manifest")
     p.add_argument("row_id", type=int)
-    p.add_argument("--config-name", default="last_default")
-    p.add_argument("--output-root", default="data/n160p100_last_output")
-    p.add_argument("--mcmc-root", default="data")
+    p.add_argument("--config-name", default="rat_k16")
+    p.add_argument("--output-root", default="data2/n160p100/n160p100_rat_k16_output/rat_k16")
+    p.add_argument("--mcmc-root", default="data/n160p100")
     p.add_argument("--train-seed", type=int, default=None)
     p.add_argument("--split-seed", type=int, default=12345)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
@@ -100,8 +100,8 @@ def parse_args():
     p.add_argument("--conditioner-type", default="mlp", choices=["mlp", "resnet"])
     p.add_argument("--hidden-units", type=int, default=64)
     p.add_argument("--num-hidden-layers", type=int, default=2)
-    p.add_argument("--K-q", type=int, default=32)
-    p.add_argument("--K-g", type=int, default=8)
+    p.add_argument("--K-q", type=int, default=12)
+    p.add_argument("--K-g", type=int, default=4)
     p.add_argument("--affine-layers-per-step", type=int, default=3)
 
     p.add_argument("--tau-start", type=float, default=0.5)
@@ -125,6 +125,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.K_q < 1 or args.K_g < 1:
+        raise ValueError("--K-q and --K-g must both be positive.")
 
     if args.device == "cpu":
         device = torch.device("cpu")
@@ -149,12 +151,13 @@ def main():
     train_seed = int(job["seed"]) if args.train_seed is None else int(args.train_seed)
 
     print("[info] project_root:", PROJECT_ROOT)
-    print("[info] method: LaST-Flow")
+    print("[info] method: RAT-Flow")
     print("[info] config_name:", args.config_name)
     print("[info] row_id:", args.row_id)
     print("[info] setting:", job["setting"])
     print("[info] seed:", int(job["seed"]))
     print("[info] split_seed:", args.split_seed)
+    print("[info] single_flow_depth:", args.K_q + args.K_g)
     print("[info] device:", device)
     print("[info] data_path:", rpath(job["data_path"]))
     print("[info] beta_path:", rpath(job["beta_path"]))

@@ -1,5 +1,6 @@
 # Full local simulation data
 data/
+data2/
 
 # Keep aggregated results under version control
 !results/

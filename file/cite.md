@@ -1,104 +1,74 @@
-# Citation checklist for the Introduction
+贝叶斯变量选择旨在识别一个简约的预测变量子集，同时联合量化变量纳入状态与非零效应大小的不确定性。离散尖峰--厚尾（discrete spike-and-slab，DSS）先验通过将每个回归系数分配至零点处的点质量或连续的厚尾分布，为这一目标提供了直接的概率建模形式。该结构能够产生精确稀疏的后验样本、具有明确解释的后验纳入概率，以及对已纳入变量效应大小的不确定性估计。然而，由此得到的后验分布定义在一个离散--连续混合空间中，其中系数大小与变量纳入状态由联合机制共同决定。该后验几何结构可能包含较强的依赖性，尤其是在预测变量高度相关、信号较弱，或多个稀疏模型能够对观测数据提供近似解释的情形下。在这些设定中，不确定性并不局限于单个系数；相互竞争的变量、不同的支持集以及整体稀疏程度在整个后验分布中都可能保持较强耦合。
 
-## Formatting / NeurIPS template
+为了在连续后验近似与精确贝叶斯稀疏性之间建立联系，我们提出一种离散尖峰--厚尾模型的潜变量表示（latent-variable representation，LVR）。从一般意义上看，LVR 将后验近似从离散--连续混合的系数空间转移至连续潜变量空间，使得面向连续变量设计的推断方法能够直接应用，同时在将潜变量映射回系数空间后，仍然保留 DSS 的精确零值解释。对于 DSS 变量选择，我们将该表示具体写为
+\[
+\beta_j
+=
+A_{\tau}(V_j)S_{\lambda}(U_j),
+\qquad
+j=1,\ldots,p,
+\label{eq:dss_lvr}
+\]
+其中，\(S_{\lambda}(U_j)\) 决定非零成分的大小与尾部行为，而 \(A_{\tau}(V_j)\) 决定第 \(j\) 个系数的稀疏状态。在精确激活映射
+\[
+A_{\tau}(V_j)
+=
+\mathbbm{1}\{V_j>\tau\},
+\label{eq:hard_activation}
+\]
+下，只要 \(V_j\leq\tau\)，对应的系数便精确等于零。我们将 \(\tau\) 称为全局阈值，因为同一个随机标量会与每个局部激活变量 \(V_j\) 进行比较。若 \(V_j\) 具有共同的分布函数 \(F_V\)，则在给定 \(\tau\) 的条件下，其先验纳入概率为
+\[
+\Pr(V_j>\tau\mid\tau)
+=
+1-F_V(\tau),
+\]
+而期望模型大小为
+\[
+\mathbb{E}\!\left[
+\sum_{j=1}^{p}\mathbbm{1}\{V_j>\tau\}
+\,\middle|\,\tau
+\right]
+=
+p\{1-F_V(\tau)\}.
+\label{eq:threshold_model_size}
+\]
 
-- NeurIPS 2026 official Overleaf template confirms that `natbib` is loaded by default and that author-year or numeric citation styles are acceptable if used consistently.
+因此，该阈值可以被直接解释为整体稀疏程度的一种连续参数化。与将 \(\tau\) 固定为正则化参数不同，我们为其指定先验，并将其与局部潜变量联合推断，从而使全局稀疏程度的不确定性能够传播至各变量的后验纳入概率。
 
-## Variable selection and penalized methods
+正规化流通过一系列可逆变换将简单的基础分布推送为灵活的连续分布。由于其可逆性以及易于计算的雅可比行列式，正规化流尤其适合在离散选择问题被转移至潜变量空间后，对连续 DSS-LVR 坐标
+\((\mathbf U,\mathbf V,\tau)\)
+的联合后验分布进行近似。
 
-1. Tibshirani (1996), "Regression Shrinkage and Selection via the Lasso".
-   - Used for classical sparse penalized regression.
-2. Fan and Li (2001), "Variable Selection via Nonconcave Penalized Likelihood and Its Oracle Properties".
-   - Used for nonconvex penalized likelihood and oracle-property variable selection.
-3. Zou (2006), "The Adaptive Lasso and Its Oracle Properties".
-   - Used for adaptive LASSO baseline/context.
-4. Buhlmann and van de Geer (2011), "Statistics for High-Dimensional Data".
-   - Used for high-dimensional sparse estimation background.
+然而，该后验结构在不同坐标之间并不具有可交换性。向量
+\(\mathbf U=(U_1,\ldots,U_p)\)
+与
+\(\mathbf V=(V_1,\ldots,V_p)\)
+分别由重复出现的局部变量构成，用于控制厚尾成分大小与激活证据；相比之下，\(\tau\) 是所有系数共享的单个全局变量。基于奇偶划分或任意坐标掩码的通用仿射耦合层无法保留这种区别：由于 \(\tau\) 只占据一个坐标，它被更新的频率可能低于局部变量集合，并且在任意给定层中只能与其中一部分局部变量直接交互。提高变换的划分粒度，例如采用逐坐标耦合结构，也无法解决这一不匹配，因为这类结构仍然没有编码潜变量的全局--局部角色。为此，我们引入一种角色感知耦合结构，将厚尾变量、激活变量和全局阈值视为三类不同的推断角色。由此得到的变换使每个局部厚尾坐标和激活坐标都能够反复接触共享阈值，同时允许阈值本身利用从局部变量中聚合的信息进行更新。将这种角色感知组织方式与 DSS-LVR 表示结合后，我们得到完整的角色感知阈值流（Role-Aware Threshold Flow，RAT-Flow）。
 
-## Bayesian variable selection and spike-and-slab priors
+由于具有较低的计算复杂度，均值场变分贝叶斯方法已被广泛用于尖峰--厚尾变量选择。然而，当 DSS-LVR 中存在全局--局部层次结构时，其因子化后验会受到明显限制。即使局部激活变量在给定 \(\tau\) 的条件下相互独立，对随机阈值进行边缘化后，其激活边际仍会产生依赖。更一般地，
+\[
+\operatorname{Cov}(V_j-\tau,V_k-\tau)
+=
+\operatorname{Cov}(V_j,V_k)
+-
+\operatorname{Cov}(V_j,\tau)
+-
+\operatorname{Cov}(V_k,\tau)
++
+\operatorname{Var}(\tau),
+\]
+因此，共享阈值中的不确定性会直接贡献于后验协方差矩阵的非对角结构。似然函数还会在局部激活证据与厚尾变量大小之间引入进一步的依赖，尤其是在预测变量相关，或多个稀疏模型能够对数据提供近似解释的情形下。均值场近似通过强制采用因子化潜变量后验抑制这些相互作用，因此可能难以重现长链 MCMC 样本中观察到的联合结构。RAT-Flow 不施加对角协方差限制，并能够通过一系列可逆耦合变换表示三类潜变量角色之间的依赖关系。
 
-5. Mitchell and Beauchamp (1988), "Bayesian Variable Selection in Linear Regression".
-   - Used for early Bayesian variable selection.
-6. George and McCulloch (1993), "Variable Selection via Gibbs Sampling".
-   - Used for spike-and-slab Gibbs sampling.
-7. George and McCulloch (1997), "Approaches for Bayesian Variable Selection".
-   - Used for general Bayesian variable selection overview.
-8. Ishwaran and Rao (2005), "Spike and Slab Variable Selection: Frequentist and Bayesian Strategies".
-   - Used for spike-and-slab variable selection.
-9. O'Hara and Sillanpaa (2009), "A Review of Bayesian Variable Selection Methods".
-   - Used for review-level background.
-10. Castillo, Schmidt-Hieber, and van der Vaart (2015), "Bayesian Linear Regression with Sparse Priors".
-    - Used for high-dimensional sparse Bayesian regression theory.
+我们在基准、弱信号、低信噪比、\(n>p\) 和 \(p\gg n\) 等设定下，通过与长链 MCMC 参考后验进行比较来评估 RAT-Flow 的后验恢复能力。实验将 RAT-Flow 与因子化均值场近似以及未采用所提角色结构的通用正规化流架构进行比较。相较于均值场近似，RAT-Flow 能够持续获得明显更准确的系数分布和后验纳入概率恢复结果。相比所提出的厚尾--激活--阈值划分方式，更粗的划分会合并具有不同潜变量角色的坐标，而更细的划分则会不必要地拆分具有相同推断功能的变量；两者都会导致较差的后验恢复结果。这一现象支持将推断角色作为构造耦合变换的自然划分单位。实验结果在不同 conditioner 架构下也保持稳定，表明性能提升主要来源于角色感知耦合结构，而不是某一种特定的神经网络参数化。在所考察的设定中，RAT-Flow 在获得上述后验恢复优势的同时，相较于多链 MCMC 参考程序具有显著更低的计算成本。
 
-## ARD / sparse Bayesian learning
+本文的主要贡献包括以下四点：
 
-11. MacKay (1992), "Bayesian Interpolation".
-    - Used for early ARD-style Bayesian evidence/shrinkage ideas.
-12. Neal (1996), "Bayesian Learning for Neural Networks".
-    - Used for Bayesian neural network / ARD background.
-13. Tipping (2001), "Sparse Bayesian Learning and the Relevance Vector Machine".
-    - Used for ARD and sparse Bayesian learning.
+\begin{itemize}
+    \item 我们提出 DSS-LVR，一种连续潜变量表示，使得基于梯度的后验近似能够应用于 DSS 模型，同时通过硬激活映射恢复精确零值系数。
 
-## Variational inference
+    \item 我们使用可学习的全局阈值构建 DSS 变量选择模型，为整体稀疏程度提供具有明确解释的后验参数化，并将模型大小的不确定性传播至各变量的后验纳入概率。
 
-14. Jordan et al. (1999), "An Introduction to Variational Methods for Graphical Models".
-    - Used for foundational VI.
-15. Wainwright and Jordan (2008), "Graphical Models, Exponential Families, and Variational Inference".
-    - Used for variational methods and graphical models.
-16. Blei, Kucukelbir, and McAuliffe (2017), "Variational Inference: A Review for Statisticians".
-    - Used for modern VI overview and limitations.
-17. Hoffman et al. (2013), "Stochastic Variational Inference".
-    - Used for scalable stochastic VI.
-18. Kingma and Welling (2014), "Auto-Encoding Variational Bayes".
-    - Used for reparameterized variational inference.
-19. Rezende, Mohamed, and Wierstra (2014), "Stochastic Backpropagation and Approximate Inference in Deep Generative Models".
-    - Used for stochastic backpropagation and reparameterized inference.
+    \item 我们提出 RAT-Flow，一种角色感知正规化流架构，其耦合变换围绕局部厚尾大小、局部激活证据与共享全局阈值进行明确组织。
 
-## Variational Bayes for spike-and-slab / variable selection
-
-20. Carbonetto and Stephens (2012), "Scalable Variational Inference for Bayesian Variable Selection in Regression, and Its Accuracy in Genetic Association Studies".
-    - Used for mean-field VB in Bayesian variable selection.
-21. Ormerod, You, and Muller (2017), "A Variational Bayes Approach to Variable Selection".
-    - Used for mean-field spike-and-slab VB theory/methodology.
-22. Ray, Szabo, and Clara (2020), "Spike and Slab Variational Bayes for High Dimensional Logistic Regression".
-    - Used for high-dimensional spike-and-slab VB.
-
-## Mean-field limitations and posterior uncertainty
-
-23. Turner and Sahani (2011), "Two Problems with Variational Expectation Maximisation for Time-Series Models".
-    - Used for underestimation and approximation issues in VI.
-24. Giordano, Broderick, and Jordan (2018), "Covariances, Robustness, and Variational Bayes".
-    - Used for posterior covariance/uncertainty limitations in VB.
-
-## Normalizing flows
-
-25. Tabak and Vanden-Eijnden (2010), "Density Estimation by Dual Ascent of the Log-Likelihood".
-    - Used for early normalizing-flow-style density transformation.
-26. Tabak and Turner (2013), "A Family of Nonparametric Density Estimation Algorithms".
-    - Used for normalizing flow background.
-27. Rezende and Mohamed (2015), "Variational Inference with Normalizing Flows".
-    - Used for flow-based variational inference.
-28. Dinh, Krueger, and Bengio (2014), "NICE: Non-linear Independent Components Estimation".
-    - Used for invertible coupling flows.
-29. Dinh, Sohl-Dickstein, and Bengio (2017), "Density Estimation Using Real NVP".
-    - Used for real-valued non-volume-preserving coupling flows.
-30. Kingma et al. (2016), "Improved Variational Inference with Inverse Autoregressive Flow".
-    - Used for autoregressive flows in VI.
-31. Papamakarios et al. (2021), "Normalizing Flows for Probabilistic Modeling and Inference".
-    - Used for normalizing flow review.
-
-## Continuous relaxations and sparse gates
-
-32. Maddison, Mnih, and Teh (2017), "The Concrete Distribution".
-    - Used for continuous relaxations of discrete random variables.
-33. Jang, Gu, and Poole (2017), "Categorical Reparameterization with Gumbel-Softmax".
-    - Used for differentiable categorical/discrete relaxations.
-34. Louizos, Welling, and Kingma (2018), "Learning Sparse Neural Networks through L0 Regularization".
-    - Used for hard-concrete/L0-style sparse gates.
-
-## Annealing and early stopping
-
-35. Rose (1998), "Deterministic Annealing for Clustering, Compression, Classification, Regression, and Related Optimization Problems".
-    - Used for deterministic annealing / continuation-style optimization.
-36. Prechelt (1998), "Early Stopping -- But When?".
-    - Used for early stopping as an optimization/regularization principle.
+    \item 我们系统比较了 RAT-Flow 与均值场变分贝叶斯、通用耦合流以及长链 MCMC 的表现，结果表明该方法能够实现准确的后验恢复，对 conditioner 设定具有稳定性，并显著降低计算成本。
+\end{itemize}

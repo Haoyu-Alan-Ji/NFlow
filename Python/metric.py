@@ -39,7 +39,7 @@ def sample_posterior_latents(model, R: int = 2000) -> Dict[str, Any]:
         eps = out[0] if isinstance(out, tuple) else out
         dec = model.generative_model.decode(eps)
     keep = [
-        "eps", "xi", "s", "u", "t", "margin", "gate", "active", "beta",
+        "eps", "xi", "s", "u", "t", "margin", "gate", "active", "beta", "beta_hard",
         "group_margin", "group_gate", "group_active", "group_ids",
     ]
     return {k: v.detach().cpu() for k, v in dec.items() if k in keep and hasattr(v, "detach")}
@@ -49,10 +49,15 @@ def hard_support_from_draws(draws: Mapping[str, Any], support_threshold: float =
     torch = _torch()
     beta = _tensor(draws["beta"])
     active = _tensor(draws.get("active", (beta.abs() > 1e-12).float()))
+    if "beta_hard" in draws:
+        beta_hard = _tensor(draws["beta_hard"])
+    elif "s" in draws:
+        beta_hard = _tensor(draws["s"]) * active
+    else:
+        raise KeyError("Hard posterior draws require beta_hard or the latent slab s.")
     pip = active.mean(dim=0)
     mask = pip > float(support_threshold)
     idx = torch.where(mask)[0].cpu().numpy().astype(int).tolist()
-    beta_hard = beta * active
     return {
         "support_idx": idx,
         "support_mask": mask.cpu(),
@@ -204,7 +209,7 @@ def _active_pairs(beta_true, max_pairs=10):
     return pairs[:max_pairs]
 
 
-def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int = 10) -> Dict[str, float]:
+def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int = 10) -> Dict[str, Any]:
     beta_last = np.asarray(to_numpy(beta_last), dtype=float)
     active_last = np.asarray(to_numpy(active_last), dtype=float)
     beta_ref = np.asarray(mcmc_ref["beta"], dtype=float)
@@ -219,8 +224,33 @@ def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int
     pip_diff = pip - pip_ref
     pip_absdiff = np.abs(pip_diff)
 
-    active_skl = [kde_skl_1d(beta_last[:, j], beta_ref[:, j]) for j in active_idx]
-    joint_skl = [kde_skl_2d(beta_last[:, [j, k]], beta_ref[:, [j, k]]) for j, k in _active_pairs(beta_true, max_pairs)]
+    active_skl = []
+    for j in active_idx:
+        try:
+            value = kde_skl_1d(
+                beta_last[:, j],
+                beta_ref[:, j],
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            value = np.nan
+        active_skl.append(value)
+
+    joint_skl = []
+    for j, k in _active_pairs(beta_true, max_pairs):
+        try:
+            value = kde_skl_2d(
+                beta_last[:, [j, k]],
+                beta_ref[:, [j, k]],
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            value = np.nan
+        joint_skl.append(value)
+
+    active_skl_valid = np.asarray(active_skl, dtype=float)
+    active_skl_valid = active_skl_valid[np.isfinite(active_skl_valid)]
+    joint_skl_valid = np.asarray(joint_skl, dtype=float)
+    joint_skl_valid = joint_skl_valid[np.isfinite(joint_skl_valid)]
+    active_skl_complete = active_skl_valid.size == len(active_skl)
 
     zero_js = [bernoulli_js(pip[j], pip_ref[j]) for j in zero_idx]
     pip_js = [bernoulli_js(pip[j], pip_ref[j]) for j in active_idx]
@@ -242,11 +272,20 @@ def recovery_metrics(beta_last, active_last, beta_true, mcmc_ref, max_pairs: int
         auprc_mcmc = float(average_precision_score(truth, pip_ref))
 
     out = {
-        "joint_skl_median": float(np.nanmedian(joint_skl)) if joint_skl else np.nan,
-        "joint_skl_mean": float(np.nanmean(joint_skl)) if joint_skl else np.nan,
+        "active_marg_skl_n_total": int(len(active_skl)),
+        "active_marg_skl_n_valid": int(active_skl_valid.size),
+        "active_marg_skl_complete": bool(active_skl_complete),
+        "active_joint_skl_n_total": int(len(joint_skl)),
+        "active_joint_skl_n_valid": int(joint_skl_valid.size),
+        "active_joint_skl_complete": bool(joint_skl_valid.size == len(joint_skl)),
 
-        "active_marg_skl_median": float(np.nanmedian(active_skl)) if active_skl else np.nan,
-        "active_marg_skl_mean": float(np.nanmean(active_skl)) if active_skl else np.nan,
+        "joint_skl_median": float(np.median(joint_skl_valid)) if joint_skl_valid.size else np.nan,
+        "joint_skl_mean": float(np.mean(joint_skl_valid)) if joint_skl_valid.size else np.nan,
+
+        "active_marg_skl_median": float(np.median(active_skl_valid)) if active_skl_complete else np.nan,
+        "active_marg_skl_mean": float(np.mean(active_skl_valid)) if active_skl_complete else np.nan,
+        "active_marg_skl_partial_median": float(np.median(active_skl_valid)) if active_skl_valid.size else np.nan,
+        "active_marg_skl_partial_mean": float(np.mean(active_skl_valid)) if active_skl_valid.size else np.nan,
 
         "zero_js_median": float(np.nanmedian(zero_js)) if zero_js else np.nan,
         "zero_js_mean": float(np.nanmean(zero_js)) if zero_js else np.nan,
@@ -297,7 +336,9 @@ def flow_row_from_result(out_flow: Mapping[str, Any]) -> Dict[str, Any]:
     row = {
         "method": out_flow.get("method"),
         "seed": out_flow.get("seed"),
-        "runtime_sec": out_flow.get("runtime_sec"),
+        "runtime_sec": out_flow.get("total_runtime_sec", out_flow.get("runtime_sec")),
+        "train_runtime_sec": out_flow.get("train_runtime_sec", out_flow.get("runtime_sec")),
+        "total_runtime_sec": out_flow.get("total_runtime_sec", out_flow.get("runtime_sec")),
         "selected_ckpt_id": out_flow.get("selected_ckpt_id"),
         "mcmc_available": out_flow.get("mcmc_info", {}).get("mcmc_available"),
         "coupling_type": model_config.get("coupling_type"),
@@ -305,9 +346,28 @@ def flow_row_from_result(out_flow: Mapping[str, Any]) -> Dict[str, Any]:
         "beta_mode": model_config.get("beta_mode"),
         "K_q": model_config.get("K_q"),
         "K_g": model_config.get("K_g"),
+        "K_flow": model_config.get("K_flow"),
         "reported_layers": model_config.get("reported_layers"),
+        "total_coupling_transforms": model_config.get("total_coupling_transforms"),
     }
-    for k in ["joint_skl_median", "active_marg_skl_median", "zero_js_median", "pip_js_median", "pip_absdiff_mean"]:
+    for k in [
+        "joint_skl_median",
+        "active_marg_skl_median",
+        "zero_js_median",
+        "pip_js_median",
+        "pip_rmse",
+        "pip_absdiff_mean",
+        "auroc_last",
+        "auprc_last",
+        "active_marg_skl_n_total",
+        "active_marg_skl_n_valid",
+        "active_marg_skl_complete",
+        "active_marg_skl_partial_median",
+        "active_marg_skl_partial_mean",
+        "active_joint_skl_n_total",
+        "active_joint_skl_n_valid",
+        "active_joint_skl_complete",
+    ]:
         row[k] = final.get("recovery_metrics", {}).get(k, np.nan)
     for k, v in (final.get("selection_metrics", {}) or {}).items():
         row[k] = v
@@ -329,7 +389,14 @@ def print_result(out: Mapping[str, Any], *, top_k: int = 20) -> None:
     rec = final.get("recovery_metrics", {}) or {}
     if rec:
         print("\n===== Posterior recovery =====")
-        cols = ["joint_skl_median", "active_marg_skl_median", "zero_js_median", "pip_js_median", "pip_absdiff_mean"]
+        cols = [
+            "joint_skl_median",
+            "active_marg_skl_median",
+            "zero_js_median",
+            "pip_rmse",
+            "auroc_last",
+            "auprc_last",
+        ]
         print(pd.DataFrame([{k: rec.get(k) for k in cols}]).to_string(index=False))
     vt = final.get("var_table")
     if isinstance(vt, pd.DataFrame) and not vt.empty:

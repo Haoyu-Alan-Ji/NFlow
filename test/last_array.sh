@@ -2,14 +2,14 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24g
-#SBATCH --array=1-100%10
-#SBATCH --output=logs/%x-%A_%a.out
-#SBATCH --error=logs/%x-%A_%a.err
+#SBATCH --array=1-100%100
+#SBATCH --output=data2/logs/%x-%A_%a.out
+#SBATCH --error=data2/logs/%x-%A_%a.err
 
 set -euo pipefail
 
 cd ~/NFlow
-mkdir -p logs
+mkdir -p data2/logs
 
 PROJECT_ROOT="$PWD"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
@@ -41,12 +41,12 @@ MANIFEST_ABS="$(abs_path "$MANIFEST")"
 OUTPUT_ROOT_ABS="$(abs_path "$OUTPUT_ROOT")"
 MCMC_ROOT_ABS="$(abs_path "$MCMC_ROOT")"
 
-CONFIG_NAME="${CONFIG_NAME:-last_default}"
+CONFIG_NAME="${CONFIG_NAME:-rat_k16}"
 COUPLING_TYPE="${COUPLING_TYPE:-semantic}"
 CONDITIONER_TYPE="${CONDITIONER_TYPE:-mlp}"
 HIDDEN_UNITS="${HIDDEN_UNITS:-64}"
 NUM_HIDDEN_LAYERS="${NUM_HIDDEN_LAYERS:-2}"
-K_Q="${K_Q:-64}"
+K_Q="${K_Q:-12}"
 K_G="${K_G:-4}"
 AFFINE_LAYERS_PER_STEP="${AFFINE_LAYERS_PER_STEP:-3}"
 
@@ -68,12 +68,9 @@ RECOVERY_MIN_EPOCH="${RECOVERY_MIN_EPOCH:-25}"
 
 ROW_ID="${SLURM_ARRAY_TASK_ID}"
 
-# Compatibility for datasets whose MCMC output is stored as
-#   <mcmc_root>/seed_400
-# rather than
-#   <mcmc_root>/simple/seed_400.
-if [[ ! -e "${MCMC_ROOT_ABS}/simple" && -d "${MCMC_ROOT_ABS}/seed_400" ]]; then
-  ln -s . "${MCMC_ROOT_ABS}/simple" 2>/dev/null || true
+if (( K_Q < 1 || K_G < 1 )); then
+  echo "K_Q and K_G must both be positive." >&2
+  exit 2
 fi
 
 echo "[info] host: $(hostname)"
@@ -88,6 +85,7 @@ echo "[info] conditioner_type: ${CONDITIONER_TYPE}"
 echo "[info] hidden_units: ${HIDDEN_UNITS}"
 echo "[info] num_hidden_layers: ${NUM_HIDDEN_LAYERS}"
 echo "[info] K_q/K_g: ${K_Q}/${K_G}"
+echo "[info] single_flow_depth: $((K_Q + K_G))"
 
 HELP="$(python test/run.py --help 2>&1 || true)"
 
