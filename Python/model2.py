@@ -198,13 +198,17 @@ class SemanticFlow(nn.Module):
 
 
 class NBase(nn.Module):
-    def __init__(self, dim, init_log_scale=-2.5):
+    def __init__(self, dim, init_sd=None):
         super().__init__()
 
         self.dim = int(dim)
+        self.init_sd = 0.5 if init_sd is None else float(init_sd)
         self.loc = nn.Parameter(torch.zeros(self.dim))
         self.raw_log_scale = nn.Parameter(
-            torch.full((self.dim,), float(init_log_scale))
+            torch.full(
+                (self.dim,),
+                math.log(self.init_sd),
+            )
         )
 
     def sample(self, R):
@@ -232,7 +236,8 @@ class NBase(nn.Module):
 
 class DSSAttentionFFNDecoder(nn.Module):
     """
-    RePU gate:
+    Normalized-RePU gates are used by default. Parameters named in
+    sigmoid_params use G(m) = sigmoid(m / sigmoid_tau).
 
         R_alpha(m) = (m_+)^alpha
 
@@ -261,6 +266,8 @@ class DSSAttentionFFNDecoder(nn.Module):
         bounded=None,
         gate_power=2.0,
         gate_tau=1.0,
+        sigmoid_params=(),
+        sigmoid_tau=1.0,
         attention_type="self",
         ffn_activation="relu",
     ):
@@ -276,6 +283,8 @@ class DSSAttentionFFNDecoder(nn.Module):
         self.gate_tau = (
             None if gate_tau is None else float(gate_tau)
         )
+        self.sigmoid_params = tuple(sigmoid_params)
+        self.sigmoid_tau = float(sigmoid_tau)
 
         self.attention_type = attention_type
         self.ffn_activation = ffn_activation.lower()
@@ -374,11 +383,31 @@ class DSSAttentionFFNDecoder(nn.Module):
 
         return F.relu(x)
 
+    def gate(self, name, margin):
+        if name in self.sigmoid_params:
+            return torch.sigmoid(margin / self.sigmoid_tau)
+
+        positive_power = F.relu(margin).pow(self.gate_power)
+
+        if self.gate_tau is None:
+            return positive_power
+
+        return positive_power / (
+            self.gate_tau ** self.gate_power + positive_power
+        )
+
+    def active(self, name, margin, sigmoid_threshold=0.5):
+        if name in self.sigmoid_params:
+            return self.gate(name, margin) > float(sigmoid_threshold)
+
+        return margin > 0.0
+
     def unpack(
         self,
         xi,
         return_summary=False,
         beta_eps=0.05,
+        sigmoid_active_threshold=0.5,
     ):
         R = xi.shape[0]
 
@@ -407,23 +436,7 @@ class DSSAttentionFFNDecoder(nn.Module):
                 - t[:, item["t"]:item["t"] + 1]
             )
 
-            positive = torch.where(
-                margin > 0.0,
-                margin,
-                torch.zeros_like(margin),
-            )
-
-            positive_power = positive.pow(
-                self.gate_power
-            )
-
-            if self.gate_tau is None:
-                gate = positive_power
-            else:
-                gate = positive_power / (
-                    self.gate_tau ** self.gate_power
-                    + positive_power
-                )
+            gate = self.gate(name, margin)
 
             if self.bounded is None:
                 val = s[:, sl] * gate
@@ -444,8 +457,10 @@ class DSSAttentionFFNDecoder(nn.Module):
             params[name] = val
 
             if return_summary:
-                active = (
-                    margin > 0.0
+                active = self.active(
+                    name,
+                    margin,
+                    sigmoid_threshold=sigmoid_active_threshold,
                 ).to(xi.dtype).reshape(
                     R,
                     *item["shape"],
@@ -478,13 +493,34 @@ class DSSAttentionFFNDecoder(nn.Module):
             summary["t_sd"] = t.std(dim=0)
 
             summary["gate_type"] = (
-                "repu"
-                if self.gate_tau is None
-                else "normalized_repu"
+                "mixed"
+                if self.sigmoid_params
+                else (
+                    "repu"
+                    if self.gate_tau is None
+                    else "normalized_repu"
+                )
             )
+
+            summary["gate_type_by_parameter"] = {
+                item["name"]: (
+                    "sigmoid"
+                    if item["name"] in self.sigmoid_params
+                    else (
+                        "repu"
+                        if self.gate_tau is None
+                        else "normalized_repu"
+                    )
+                )
+                for item in self.param_specs
+            }
 
             summary["gate_power"] = self.gate_power
             summary["gate_tau"] = self.gate_tau
+            summary["sigmoid_tau"] = self.sigmoid_tau
+            summary["sigmoid_active_threshold"] = float(
+                sigmoid_active_threshold
+            )
             summary["beta_eps"] = beta_eps
 
             return params, summary
@@ -565,6 +601,7 @@ class LaSTBNNVI(nn.Module):
         out_dim=1,
         family="gaussian",
         sigma2=1.0,
+        init_sd=None,
         K_flow=4,
         flow_hidden_units=128,
         flow_hidden_layers=2,
@@ -572,6 +609,8 @@ class LaSTBNNVI(nn.Module):
         bounded=None,
         gate_power=2.0,
         gate_tau=1.0,
+        sigmoid_params=(),
+        sigmoid_tau=1.0,
         attention_type="self",
         ffn_activation="relu",
     ):
@@ -602,13 +641,17 @@ class LaSTBNNVI(nn.Module):
             bounded=bounded,
             gate_power=gate_power,
             gate_tau=gate_tau,
+            sigmoid_params=sigmoid_params,
+            sigmoid_tau=sigmoid_tau,
             attention_type=attention_type,
             ffn_activation=ffn_activation,
         )
 
         self.q0 = NBase(
             self.decoder.dim,
+            init_sd=init_sd,
         )
+        self.init_sd = self.q0.init_sd
 
         self.flow = SemanticFlow(
             self.decoder.s_dim,
@@ -635,22 +678,25 @@ class LaSTBNNVI(nn.Module):
 
         return xi, log_q
 
-    def log_likelihood(self, xi):
+    def log_likelihood(self, xi, X=None, y=None):
+        X = self.X if X is None else X
+        y = self.y if y is None else y
+
         pred = self.decoder(
-            self.X,
+            X,
             xi,
         )
 
         if self.family == "gaussian":
             resid = (
-                self.y[None, :]
+                y[None, :]
                 - pred
             )
 
             return -0.5 * (
                 resid.square().sum(dim=1)
                 / self.sigma2
-                + self.y.numel()
+                + y.numel()
                 * torch.log(
                     2.0
                     * torch.pi
@@ -663,7 +709,7 @@ class LaSTBNNVI(nn.Module):
             "binomial",
             "logistic",
         }:
-            y = self.y[None, :].expand_as(
+            y = y[None, :].expand_as(
                 pred
             )
 
@@ -676,7 +722,7 @@ class LaSTBNNVI(nn.Module):
             )
 
         if self.family == "poisson":
-            y = self.y[None, :].expand_as(
+            y = y[None, :].expand_as(
                 pred
             )
 
@@ -696,14 +742,14 @@ class LaSTBNNVI(nn.Module):
         )
 
         idx = torch.arange(
-            self.y.numel(),
-            device=self.y.device,
+            y.numel(),
+            device=y.device,
         )
 
         return logp[
             :,
             idx,
-            self.y.long(),
+            y.long(),
         ].sum(dim=1)
 
     def log_prior(self, xi):
@@ -718,18 +764,31 @@ class LaSTBNNVI(nn.Module):
             + self.log_prior(xi)
         )
 
+    def elbo_draws(self, R):
+        xi, log_q = self.sample_posterior(R)
+        log_likelihood = self.log_likelihood(xi)
+        log_prior = self.log_prior(xi)
+
+        return {
+            "xi": xi,
+            "log_likelihood": log_likelihood,
+            "log_prior": log_prior,
+            "log_q": log_q,
+            "kl": log_q - log_prior,
+            "elbo": log_likelihood + log_prior - log_q,
+        }
+
     def neg_elbo(
         self,
         R=64,
         elbo_beta=1.0,
     ):
-        xi, log_q = self.sample_posterior(R)
+        draws = self.elbo_draws(R)
 
-        return (
-            log_q
-            - float(elbo_beta)
-            * self.log_likelihood(xi)
-            - self.log_prior(xi)
+        return -(
+            float(elbo_beta) * draws["log_likelihood"]
+            + draws["log_prior"]
+            - draws["log_q"]
         ).mean()
 
     @torch.no_grad()
@@ -782,3 +841,247 @@ class LaSTBNNVI(nn.Module):
         )
 
         return summary
+
+
+ROLE_NAMES = ("input", "breakpoint", "output")
+
+
+class DirectUnitDecoder(nn.Module):
+    """
+    One-dimensional direct unit model
+
+        f(x) = beta0 + ell*x + sum_j a_j ReLU(w_j*x - b_j).
+
+    beta0 and ell are continuous. Each role has H slab/local coordinates and
+    one shared threshold. Roles omitted from gate_roles are fixed open.
+    """
+
+    def __init__(
+        self,
+        H=3,
+        gate_roles=ROLE_NAMES,
+        gate_power=2.0,
+        gate_tau=1.0,
+    ):
+        super().__init__()
+
+        self.H = int(H)
+        self.role_names = ROLE_NAMES
+        self.gate_roles = tuple(gate_roles)
+        self.gate_power = float(gate_power)
+        self.gate_tau = None if gate_tau is None else float(gate_tau)
+
+        self.s_role_slices = {
+            role: slice(2 + k * self.H, 2 + (k + 1) * self.H)
+            for k, role in enumerate(self.role_names)
+        }
+        self.u_role_slices = {
+            role: slice(k * self.H, (k + 1) * self.H)
+            for k, role in enumerate(self.role_names)
+        }
+        self.t_role_index = {
+            role: k for k, role in enumerate(self.role_names)
+        }
+
+        self.s_dim = 2 + 3 * self.H
+        self.u_dim = 3 * self.H
+        self.t_dim = 3
+        self.dim = self.s_dim + self.u_dim + self.t_dim
+
+    def gate(self, role, margin):
+        if role not in self.gate_roles:
+            return torch.ones_like(margin)
+
+        positive_power = F.relu(margin).pow(self.gate_power)
+
+        if self.gate_tau is None:
+            return positive_power
+
+        return positive_power / (
+            self.gate_tau ** self.gate_power + positive_power
+        )
+
+    def unpack(self, xi, return_semantics=False):
+        s = xi[:, :self.s_dim]
+        u = xi[:, self.s_dim:self.s_dim + self.u_dim]
+        t = xi[:, self.s_dim + self.u_dim:]
+        semantics = {}
+
+        for role in self.role_names:
+            slab = s[:, self.s_role_slices[role]]
+            local = u[:, self.u_role_slices[role]]
+            threshold = t[
+                :,
+                self.t_role_index[role]:self.t_role_index[role] + 1,
+            ]
+            margin = local - threshold
+            gate = self.gate(role, margin)
+            active = (
+                margin > 0.0
+                if role in self.gate_roles
+                else torch.ones_like(margin, dtype=torch.bool)
+            )
+
+            semantics[role] = {
+                "s": slab,
+                "u": local,
+                "t": threshold,
+                "margin": margin,
+                "gate": gate,
+                "active": active,
+                "theta": slab * gate,
+            }
+
+        params = {
+            "beta0": s[:, 0],
+            "ell": s[:, 1],
+            "w": semantics["input"]["theta"],
+            "b": semantics["breakpoint"]["theta"],
+            "a": semantics["output"]["theta"],
+        }
+
+        if return_semantics:
+            return params, semantics
+
+        return params
+
+    def unit_contributions(self, X, xi):
+        params = self.unpack(xi)
+        x = X[:, 0]
+        hidden = F.relu(
+            params["w"][:, None, :] * x[None, :, None]
+            - params["b"][:, None, :]
+        )
+
+        return params["a"][:, None, :] * hidden
+
+    def forward(self, X, xi):
+        params = self.unpack(xi)
+        x = X[:, 0]
+        hidden = F.relu(
+            params["w"][:, None, :] * x[None, :, None]
+            - params["b"][:, None, :]
+        )
+        units = params["a"][:, None, :] * hidden
+
+        return (
+            params["beta0"][:, None]
+            + params["ell"][:, None] * x[None, :]
+            + units.sum(dim=2)
+        )
+
+
+class DirectUnitBNNVI(nn.Module):
+    def __init__(
+        self,
+        X,
+        y,
+        H=3,
+        family="gaussian",
+        sigma2=1.0,
+        gate_roles=ROLE_NAMES,
+        gate_power=2.0,
+        gate_tau=1.0,
+        init_sd=None,
+        K_flow=8,
+        flow_hidden_units=64,
+        flow_hidden_layers=2,
+        scale_clip=1.5,
+    ):
+        super().__init__()
+
+        self.register_buffer("X", X)
+        self.register_buffer("y", y)
+        self.register_buffer(
+            "sigma2",
+            torch.tensor(float(sigma2), dtype=X.dtype),
+        )
+
+        self.family = family.lower()
+        self.decoder = DirectUnitDecoder(
+            H=H,
+            gate_roles=gate_roles,
+            gate_power=gate_power,
+            gate_tau=gate_tau,
+        )
+        self.q0 = NBase(self.decoder.dim, init_sd=init_sd)
+        self.init_sd = self.q0.init_sd
+        self.flow = SemanticFlow(
+            self.decoder.s_dim,
+            self.decoder.u_dim,
+            self.decoder.t_dim,
+            K=K_flow,
+            hidden_units=flow_hidden_units,
+            num_hidden_layers=flow_hidden_layers,
+            scale_clip=scale_clip,
+        )
+
+    def sample_posterior(self, R):
+        z0 = self.q0.sample(R)
+        xi, logdet = self.flow(z0, return_logdet=True)
+        log_q = self.q0.log_prob(z0) - logdet
+
+        return xi, log_q
+
+    def log_likelihood(self, xi, X=None, y=None):
+        X = self.X if X is None else X
+        y = self.y if y is None else y
+        pred = self.decoder(X, xi)
+
+        if self.family == "gaussian":
+            resid = y[None, :] - pred
+
+            return -0.5 * (
+                resid.square().sum(dim=1) / self.sigma2
+                + y.numel() * torch.log(2.0 * torch.pi * self.sigma2)
+            )
+
+        if self.family in {"bernoulli", "binomial", "logistic"}:
+            return -F.binary_cross_entropy_with_logits(
+                pred,
+                y[None, :].expand_as(pred),
+                reduction="none",
+            ).sum(dim=1)
+
+        rate = torch.exp(pred.clamp(-20.0, 20.0))
+
+        return (
+            y[None, :] * pred
+            - rate
+            - torch.lgamma(y[None, :] + 1.0)
+        ).sum(dim=1)
+
+    def log_prior(self, xi):
+        return -0.5 * (
+            xi.square() + math.log(2.0 * math.pi)
+        ).sum(dim=1)
+
+    def elbo_draws(self, R):
+        xi, log_q = self.sample_posterior(R)
+        log_likelihood = self.log_likelihood(xi)
+        log_prior = self.log_prior(xi)
+
+        return {
+            "xi": xi,
+            "log_likelihood": log_likelihood,
+            "log_prior": log_prior,
+            "log_q": log_q,
+            "kl": log_q - log_prior,
+            "elbo": log_likelihood + log_prior - log_q,
+        }
+
+    def neg_elbo(self, R=64):
+        return -self.elbo_draws(R)["elbo"].mean()
+
+    @torch.no_grad()
+    def predict(self, X_new, R=1000):
+        xi, _ = self.sample_posterior(R)
+        pred = self.decoder(X_new, xi)
+
+        if self.family == "gaussian":
+            return pred.mean(dim=0)
+
+        if self.family in {"bernoulli", "binomial", "logistic"}:
+            return torch.sigmoid(pred).mean(dim=0)
+
+        return torch.exp(pred.clamp(-20.0, 20.0)).mean(dim=0)
