@@ -1,0 +1,6 @@
+environment,setting,n,p,n_active,sigma2,beta_low,beta_high,seeds,split
+Baseline,simple,160,100,10,1,0.3,2.0,400-499,60/20/20
+Low SNR,low_snr,160,100,10,10,0.3,2.0,400-499,60/20/20
+n>p,simple,1000,100,10,1,0.3,2.0,400-499,60/20/20
+p>>n,simple,100,500,10,1,0.3,2.0,400-499,60/20/20
+Weak signals,weak_signal,160,100,10,1,0.1,0.5,400-499,60/20/20

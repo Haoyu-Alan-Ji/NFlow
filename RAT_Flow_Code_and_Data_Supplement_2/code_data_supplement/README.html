@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.25">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>readme</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="README_files/libs/clipboard/clipboard.min.js"></script>
+<script src="README_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="README_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="README_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="README_files/libs/quarto-html/popper.min.js"></script>
+<script src="README_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="README_files/libs/quarto-html/anchor.min.js"></script>
+<link href="README_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="README_files/libs/quarto-html/quarto-syntax-highlighting-7b89279ff1a6dce999919e0e67d4d9ec.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="README_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="README_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="README_files/libs/bootstrap/bootstrap-9e3ffae467580fdb927a41352e75a2e0.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="code-and-data-supplement" class="level1">
+<h1>Code and Data Supplement</h1>
+<section id="scope" class="level2">
+<h2 class="anchored" data-anchor-id="scope">Scope</h2>
+<p>This compact supplement records the computational path used for the simulation study in <em>Role-Aware Threshold Flow: Flow-Based Variational Inference for Bayesian Variable Selection</em>. It contains pseudocode and three selected tables sufficient to identify the data-generating settings, inspect the reported posterior/support summaries, and audit a representative multi-chain MH run. Raw observations, posterior draws, checkpoints, and logs are not included. No external repository is required or linked.</p>
+</section>
+<section id="included-tables" class="level2">
+<h2 class="anchored" data-anchor-id="included-tables">Included tables</h2>
+<ul>
+<li><code>experiment_manifest.csv</code> lists the five simulation environments. Each row specifies the sample size, dimension, number of active predictors, noise variance, signal range, seeds, and train/validation/test split.</li>
+<li><code>posterior_support_summary.csv</code> reports the selected Appendix C.1 results. Each row is an environment–configuration pair; <code>N</code> is the number of completed seeds, and every metric is followed by its 95% bootstrap confidence limits. Lower values are better for <code>D_SKL_A</code>, <code>D_JS_0</code>, and <code>RMSE_PIP</code>; higher values are better for <code>AUROC</code> and <code>AUPRC</code>.</li>
+<li><code>mh_chain_summary.csv</code> gives per-chain diagnostics for one representative eight-chain MH run (baseline environment, simulation seed 400). It is included to document chain length, acceptance, adapted proposal scales, and runtime; it is not a cross-seed performance table.</li>
+</ul>
+<p>The tables follow the workflow below: use the manifest to identify an environment, use the posterior/support table to locate its aggregated results, and use the MH chain table only as an implementation and timing check for the disclosed sampler.</p>
+</section>
+<section id="function-map" class="level2">
+<h2 class="anchored" data-anchor-id="function-map">Function map</h2>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>File</th>
+<th>Main function</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>simfun.py</code></td>
+<td><code>simfun1()</code></td>
+<td>Generate the standardized Gaussian design, sparse coefficients, and Gaussian response.</td>
+</tr>
+<tr class="even">
+<td><code>make_data.py</code></td>
+<td><code>make_dataset()</code>, <code>export_one()</code></td>
+<td>Apply an environment setting and write data, truth, and manifest records.</td>
+</tr>
+<tr class="odd">
+<td><code>run.py</code></td>
+<td><code>read_job()</code>, <code>read_data()</code>, <code>make_schedule()</code>, <code>main()</code></td>
+<td>Read one manifest row and launch one VI run.</td>
+</tr>
+<tr class="even">
+<td><code>model.py</code></td>
+<td><code>build_flow_vi()</code></td>
+<td>Build the diagonal base distribution, semantic flow, and relaxed DSS likelihood.</td>
+</tr>
+<tr class="odd">
+<td><code>framework.py</code></td>
+<td><code>simflow_stagewise()</code></td>
+<td>Split data, train, select a checkpoint, sample the posterior, and save outputs.</td>
+</tr>
+<tr class="even">
+<td><code>framework.py</code></td>
+<td><code>train_flow_stagewise()</code></td>
+<td>Run Adam stages and checkpoint evaluations.</td>
+</tr>
+<tr class="odd">
+<td><code>metric.py</code></td>
+<td><code>sample_posterior_latents()</code>, <code>hard_support_from_draws()</code></td>
+<td>Draw posterior samples and convert activation margins to inclusion draws.</td>
+</tr>
+<tr class="even">
+<td><code>metric.py</code></td>
+<td><code>recovery_metrics()</code></td>
+<td>Compare VI draws and PIPs with retained reference posterior summaries.</td>
+</tr>
+<tr class="odd">
+<td><code>artifact.py</code></td>
+<td><code>save_run_artifacts()</code></td>
+<td>Write run configuration and seed-level summaries.</td>
+</tr>
+<tr class="even">
+<td>Multi-chain MH runner</td>
+<td><code>run_multichain_mh()</code></td>
+<td>Run eight sequential component-wise random-walk MH chains.</td>
+</tr>
+<tr class="odd">
+<td><code>postprocess_tables.py</code></td>
+<td>Aggregation loop</td>
+<td>Combine seed-level results and calculate confidence intervals.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="pseudocode" class="level2">
+<h2 class="anchored" data-anchor-id="pseudocode">Pseudocode</h2>
+<section id="generate-datasets" class="level3">
+<h3 class="anchored" data-anchor-id="generate-datasets">1. Generate datasets</h3>
+<pre class="text"><code>FOR environment IN experiment_manifest:
+    FOR seed IN 400,...,499:
+        X &lt;- iid N(0,1), then center and scale each column
+        A &lt;- sample 10 predictor indices without replacement
+        beta[A] &lt;- random signs * Uniform(beta_low, beta_high)
+        y &lt;- X beta + N(0, sigma2); center y
+
+        WRITE data, coefficient truth, and manifest record</code></pre>
+</section>
+<section id="fit-a-variational-method" class="level3">
+<h3 class="anchored" data-anchor-id="fit-a-variational-method">2. Fit a variational method</h3>
+<pre class="text"><code>RUN_VI(manifest_row, method_config):
+    X, y, beta_true &lt;- read_data(manifest_row)
+    train, validation, test &lt;- split 60%/20%/20% with seed 12345
+
+    IF Mean-field:
+        posterior &lt;- diagonal Gaussian
+    ELSE:
+        posterior &lt;- semantic flow with 68 role-aware cycles
+
+    RUN one 200-epoch warm-up stage and five 500--1000-epoch stages
+        temperature &lt;- 0.8
+        loss &lt;- negative ELBO from 128 reparameterized draws
+        Adam update with gradient norm clipped at 3
+        every 25 epochs, evaluate checkpoint from 64 draws
+
+    SELECT the lowest checkpoint score after epoch 25
+    DRAW 4000 posterior samples
+    gamma[j] &lt;- 1(activation[j] &gt; global_threshold)
+    PIP[j] &lt;- mean(gamma[j]); selected[j] &lt;- 1(PIP[j] &gt; 0.5)
+    WRITE seed-level summaries</code></pre>
+<p>RAT-Flow uses an MLP 2/64 conditioner, ResCond uses two 64-unit residual blocks, and Deep MLP uses MLP 4/256. Other training settings are shared.</p>
+</section>
+<section id="run-multi-chain-mh" class="level3">
+<h3 class="anchored" data-anchor-id="run-multi-chain-mh">3. Run multi-chain MH</h3>
+<pre class="text"><code>RUN_MULTICHAIN_MH(manifest_row):
+    target &lt;- known-variance Gaussian likelihood + independent N(0,1) latents
+
+    FOR chain c IN 1,...,8, sequentially:
+        seed &lt;- simulation_seed + 100000*c
+        initialize all 2p+1 latents independently from N(0,1)
+        initialize coordinate proposal SDs at 0.10
+
+        FOR sweep IN 1,...,50000:
+            update each coordinate by Gaussian random-walk MH
+            during sweeps 1,...,10000, adapt every 100 sweeps
+            toward acceptance 0.44
+
+        RETAIN sweeps 10001,...,50000 without thinning
+        WRITE acceptance, proposal-scale summary, and runtime</code></pre>
+<p>Retained reference posterior summaries provide the numerical posterior-reference and MCMC support entries in Appendix C.1. The disclosed eight-chain MH runs provide the algorithm specification and timing evidence. Inclusion is defined by the hard activation margin and requires no coefficient-magnitude cutoff.</p>
+</section>
+<section id="aggregate-results" class="level3">
+<h3 class="anchored" data-anchor-id="aggregate-results">4. Aggregate results</h3>
+<pre class="text"><code>FOR every completed VI seed:
+    LOAD seed-level summaries and matching reference PIPs
+    COMPUTE D_SKL_A, D_JS_0, RMSE_PIP, AUROC, and AUPRC
+
+GROUP by environment and configuration
+REPORT mean metric and 95% bootstrap interval
+WRITE posterior_support_summary.csv</code></pre>
+</section>
+</section>
+<section id="software-and-execution-context" class="level2">
+<h2 class="anchored" data-anchor-id="software-and-execution-context">Software and execution context</h2>
+<p>VI jobs use CPU PyTorch in the <code>nf311</code> Conda environment after loading <code>python3/3.10.9_anaconda2023.03_libmamba</code>. They request four CPU cores; flow jobs request 24 GB and mean-field jobs 12 GB. Multi-chain MH jobs use the cluster R module, one CPU core, and 24 GB. Exact package patch versions were not serialized in the seed-level artifacts.</p>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
