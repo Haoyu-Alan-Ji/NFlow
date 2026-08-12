@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 
 from . import metric
-from .model2 import DirectUnitBNNVI, LaSTBNNVI, ROLE_NAMES
+from .model2 import DirectUnitBNNVI, GroupedBNNVI, LaSTBNNVI, ROLE_NAMES
 
 
 def train_direct_bnn(
@@ -413,9 +413,12 @@ def train_edge_bnn(
     sigma2=1.0,
     init_sd=None,
     K_flow=8,
+    flow_type="semantic",
     flow_hidden_units=64,
     flow_hidden_layers=2,
     scale_clip=1.5,
+    flow_token_dim=32,
+    flow_num_heads=4,
     bounded=None,
     gate_power=2.0,
     gate_tau=1.0,
@@ -483,9 +486,12 @@ def train_edge_bnn(
         sigma2=sigma2,
         init_sd=init_sd,
         K_flow=K_flow,
+        flow_type=flow_type,
         flow_hidden_units=flow_hidden_units,
         flow_hidden_layers=flow_hidden_layers,
         scale_clip=scale_clip,
+        flow_token_dim=flow_token_dim,
+        flow_num_heads=flow_num_heads,
         bounded=bounded,
         gate_power=gate_power,
         gate_tau=gate_tau,
@@ -726,6 +732,7 @@ def train_edge_bnn(
             "sigmoid_zero_threshold": float(sigmoid_zero_threshold),
             "init_sd": model.q0.init_sd,
             "K_flow": int(K_flow),
+            "flow_type": flow_type,
             "R_train": int(R_train),
             "R_eval": int(R_eval),
             "R_final": int(R_final),
@@ -734,3 +741,290 @@ def train_edge_bnn(
             "seed": int(seed),
         },
     }
+
+
+def train_grouped_bnn(
+    X_train,
+    y_train,
+    X_eval,
+    signal_eval,
+    *,
+    mcmc_decoder,
+    mcmc_xi,
+    truth,
+    X_final=None,
+    signal_final=None,
+    selection_mode="unit_group",
+    input_dim=None,
+    H=5,
+    out_dim=1,
+    family="gaussian",
+    sigma2=1.0,
+    init_sd=None,
+    K_flow=8,
+    flow_type="attention_affine",
+    flow_hidden_units=64,
+    flow_hidden_layers=2,
+    scale_clip=1.5,
+    flow_token_dim=32,
+    flow_num_heads=4,
+    flow_mask_seed=None,
+    gate_power=1.0,
+    gate_tau=None,
+    repu_power=None,
+    linear_skip=False,
+    epochs=6000,
+    lr=3e-4,
+    R_train=64,
+    R_eval=1000,
+    R_final=5000,
+    eval_every=250,
+    grad_clip=5.0,
+    min_active_draws=50,
+    zero_tol=1e-6,
+    constant_tol=1e-6,
+    seed=123,
+):
+    """Train the single-group/single-ReLU-gate shallow BNN."""
+
+    if selection_mode not in {"unit_group", "feature_group"}:
+        raise ValueError("Use train_edge_bnn for selection_mode='edge'.")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if flow_mask_seed is None:
+        flow_mask_seed = int(seed)
+
+    device = X_train.device
+    dtype = X_train.dtype
+    X_eval = torch.as_tensor(X_eval, device=device, dtype=dtype)
+    signal_eval = torch.as_tensor(signal_eval, device=device, dtype=dtype)
+    X_final = X_eval if X_final is None else torch.as_tensor(
+        X_final, device=device, dtype=dtype
+    )
+    signal_final = signal_eval if signal_final is None else torch.as_tensor(
+        signal_final, device=device, dtype=dtype
+    )
+    mcmc_xi = torch.as_tensor(mcmc_xi, device=device, dtype=dtype)
+
+    model = GroupedBNNVI(
+        X=X_train,
+        y=y_train,
+        input_dim=input_dim,
+        H=H,
+        out_dim=out_dim,
+        selection_mode=selection_mode,
+        family=family,
+        sigma2=sigma2,
+        init_sd=init_sd,
+        K_flow=K_flow,
+        flow_type=flow_type,
+        flow_hidden_units=flow_hidden_units,
+        flow_hidden_layers=flow_hidden_layers,
+        scale_clip=scale_clip,
+        flow_token_dim=flow_token_dim,
+        flow_num_heads=flow_num_heads,
+        flow_mask_seed=flow_mask_seed,
+        gate_power=gate_power,
+        gate_tau=gate_tau,
+        repu_power=repu_power,
+        linear_skip=linear_skip,
+    ).to(device)
+
+    if model.decoder.compatibility_signature() != mcmc_decoder.compatibility_signature():
+        raise ValueError("MCMC and VI must use exactly the same grouped decoder.")
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = []
+    group_history = []
+    unit_history = []
+    best_r2 = -np.inf
+    best_epoch = None
+    best_state = None
+
+    for epoch in range(1, int(epochs) + 1):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        train_terms = model.elbo_draws(R_train)
+        loss = -train_terms["elbo"].mean()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+
+        if epoch != 1 and epoch % int(eval_every) != 0:
+            continue
+
+        model.eval()
+        with torch.no_grad():
+            xi_eval, log_q_eval = model.sample_posterior(R_eval)
+            log_likelihood = model.log_likelihood(xi_eval)
+            log_prior = model.log_prior(xi_eval)
+            pred_eval = model.decoder(X_eval, xi_eval)
+
+        function = metric.function_recovery_metrics(
+            signal=signal_eval,
+            pred_draws=pred_eval,
+            prefix="val",
+            zero_tol=zero_tol,
+            constant_tol=constant_tol,
+        )
+        recovery, _ = metric.grouped_recovery_metrics(
+            rat_decoder=model.decoder,
+            rat_xi=xi_eval,
+            mcmc_decoder=mcmc_decoder,
+            mcmc_xi=mcmc_xi,
+            truth=truth,
+            min_active_draws=min_active_draws,
+        )
+        groups = metric.group_posterior_summary(
+            model.decoder, xi_eval, method="RaT", epoch=epoch
+        )
+        units = metric.unit_group_summary(
+            model.decoder, xi_eval, method="RaT", epoch=epoch
+        )
+        row = {
+            "epoch": epoch,
+            "loss": float(loss.detach()),
+            "expected_log_likelihood": float(log_likelihood.mean()),
+            "expected_log_prior": float(log_prior.mean()),
+            "expected_log_q": float(log_q_eval.mean()),
+            "kl_q_prior": float((log_q_eval - log_prior).mean()),
+            "elbo": float((log_likelihood + log_prior - log_q_eval).mean()),
+            **function,
+            **recovery,
+        }
+        history.append(row)
+        group_history.extend(groups.to_dict("records"))
+        unit_history.extend(units.to_dict("records"))
+
+        if row["val_signal_r2"] > best_r2:
+            best_r2 = row["val_signal_r2"]
+            best_epoch = epoch
+            best_state = copy.deepcopy(model.state_dict())
+
+        print(
+            f"epoch={epoch:04d} "
+            f"valR2={row['val_signal_r2']:.4f} "
+            f"pipRMSE={row['pip_rmse_mcmc']:.4f} "
+            f"trueSKL={row['true_active_skl']:.4f} "
+            f"zeroJS={row['zero_js']:.4f}"
+        )
+
+    if best_state is None:
+        raise RuntimeError("No evaluation checkpoint was produced.")
+
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        xi_final, log_q_final = model.sample_posterior(R_final)
+        final_log_likelihood = model.log_likelihood(xi_final)
+        final_log_prior = model.log_prior(xi_final)
+        rat_pred = metric.predict_draws(model.decoder, X_final, xi_final)
+        mcmc_pred = metric.predict_draws(mcmc_decoder, X_final, mcmc_xi)
+
+    recovery, recovery_table = metric.grouped_recovery_metrics(
+        rat_decoder=model.decoder,
+        rat_xi=xi_final,
+        mcmc_decoder=mcmc_decoder,
+        mcmc_xi=mcmc_xi,
+        truth=truth,
+        min_active_draws=min_active_draws,
+    )
+    rat_function = metric.function_recovery_metrics(
+        signal=signal_final,
+        pred_draws=rat_pred,
+        prefix="rat",
+        zero_tol=zero_tol,
+        constant_tol=constant_tol,
+    )
+    mcmc_function = metric.function_recovery_metrics(
+        signal=signal_final,
+        pred_draws=mcmc_pred,
+        prefix="mcmc",
+        zero_tol=zero_tol,
+        constant_tol=constant_tol,
+    )
+    summary = {
+        "best_epoch": best_epoch,
+        "best_val_signal_r2": best_r2,
+        "expected_log_likelihood": float(final_log_likelihood.mean()),
+        "expected_log_prior": float(final_log_prior.mean()),
+        "expected_log_q": float(log_q_final.mean()),
+        "kl_q_prior": float((log_q_final - final_log_prior).mean()),
+        "elbo": float(
+            (final_log_likelihood + final_log_prior - log_q_final).mean()
+        ),
+        **recovery,
+        **rat_function,
+        **mcmc_function,
+    }
+
+    rat_groups = metric.group_posterior_summary(
+        model.decoder, xi_final, method="RaT", epoch=best_epoch
+    )
+    mcmc_groups = metric.group_posterior_summary(
+        mcmc_decoder, mcmc_xi, method="MCMC"
+    )
+    rat_units = metric.unit_group_summary(
+        model.decoder, xi_final, method="RaT", epoch=best_epoch
+    )
+    mcmc_units = metric.unit_group_summary(
+        mcmc_decoder, mcmc_xi, method="MCMC"
+    )
+
+    return {
+        "model": model,
+        "history": pd.DataFrame(history),
+        "group_history": pd.DataFrame(group_history),
+        "unit_history": pd.DataFrame(unit_history),
+        "final": {
+            "summary": summary,
+            "xi": xi_final.detach(),
+            "rat_prediction_draws": rat_pred,
+            "mcmc_prediction_draws": mcmc_pred,
+            "recovery_by_target": recovery_table,
+            "group_metrics": pd.concat(
+                [rat_groups, mcmc_groups], ignore_index=True
+            ),
+            "unit_metrics": pd.concat(
+                [rat_units, mcmc_units], ignore_index=True
+            ) if not rat_units.empty else pd.DataFrame(),
+        },
+        "config": {
+            "selection_mode": selection_mode,
+            "input_dim": model.decoder.input_dim,
+            "H": int(model.decoder.H),
+            "out_dim": int(out_dim),
+            "linear_skip": bool(linear_skip),
+            "flow_type": flow_type,
+            "K_flow": int(K_flow),
+            "flow_token_dim": int(flow_token_dim),
+            "flow_num_heads": int(flow_num_heads),
+            "flow_mask_seed": int(flow_mask_seed),
+            "repu_power": repu_power,
+            "gate_power": float(gate_power),
+            "gate_tau": gate_tau,
+            "init_sd": model.q0.init_sd,
+            "R_train": int(R_train),
+            "R_eval": int(R_eval),
+            "R_final": int(R_final),
+            "epochs": int(epochs),
+            "seed": int(seed),
+        },
+    }
+
+
+def train_bnn(*args, selection_mode="unit_group", **kwargs):
+    """Unified training dispatcher while retaining the legacy edge baseline."""
+
+    if selection_mode == "edge":
+        return train_edge_bnn(*args, **kwargs)
+    return train_grouped_bnn(
+        *args,
+        selection_mode=selection_mode,
+        **kwargs,
+    )

@@ -1636,3 +1636,314 @@ def residual_path_metrics(
     })
 
     return {"summary": summary, "units": units_table}
+
+
+def group_posterior_summary(decoder, xi, method="RaT", epoch=None):
+    """Posterior PIP, gate, margin, and slab norm for each LVR group."""
+
+    with torch.no_grad():
+        semantics = decoder.group_semantics(xi)
+        slab_norm = decoder.group_slab_norms(xi)
+
+    rows = []
+    for meta in decoder.group_meta:
+        group_id = int(meta["group_id"])
+        rows.append({
+            "method": method,
+            "epoch": epoch,
+            **meta,
+            "pip": float(semantics["active"][:, group_id].float().mean()),
+            "gate_mean": float(semantics["gate"][:, group_id].mean()),
+            "margin_mean": float(semantics["margin"][:, group_id].mean()),
+            "margin_sd": float(semantics["margin"][:, group_id].std()),
+            "slab_norm_mean": float(slab_norm[:, group_id].mean()),
+            "slab_norm_median": float(slab_norm[:, group_id].median()),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def unit_group_summary(decoder, xi, method="RaT", epoch=None):
+    """Single-group/single-gate diagnostics for each shallow hidden unit."""
+
+    if decoder.selection_mode != "unit_group":
+        return pd.DataFrame()
+
+    with torch.no_grad():
+        units = decoder.unit_semantics(xi)
+
+    rows = []
+    for index, meta in enumerate(decoder.unit_groups):
+        rows.append({
+            "method": method,
+            "epoch": epoch,
+            "block": meta["block"],
+            "unit": meta["unit"],
+            "group_id": meta["group_id"],
+            "unit_pip": float(units["active"][:, index].float().mean()),
+            "gate_mean": float(units["gate"][:, index].mean()),
+            "margin_mean": float(units["margin"][:, index].mean()),
+            "margin_sd": float(units["margin"][:, index].std()),
+            "input_slab_norm_mean": float(
+                units["input_slab_norm"][:, index].mean()
+            ),
+            "output_slab_norm_mean": float(
+                units["output_slab_norm"][:, index].mean()
+            ),
+            "slab_strength_mean": float(
+                units["slab_strength"][:, index].mean()
+            ),
+            "effective_strength_mean": float(
+                units["effective_strength"][:, index].mean()
+            ),
+        })
+
+    table = pd.DataFrame(rows)
+    if not table.empty:
+        rank = table["unit_pip"].rank(method="first", ascending=False).astype(int)
+        table.insert(5, "posterior_rank", rank)
+        table = table.sort_values(["block", "posterior_rank"]).reset_index(drop=True)
+    return table
+
+
+def _ranked_unit_selection_draws(decoder, xi):
+    units = decoder.unit_semantics(xi)
+    order = torch.argsort(units["effective_strength"], dim=1, descending=True)
+    return {
+        "pip_draws": torch.gather(units["active"], 1, order),
+        "slab_strength": torch.gather(units["slab_strength"], 1, order),
+        "effective_strength": torch.gather(
+            units["effective_strength"], 1, order
+        ),
+    }
+
+
+def _feature_selection_draws(decoder, xi):
+    semantics = decoder.group_semantics(xi)
+    slab_norm = decoder.group_slab_norms(xi)
+    return {
+        "pip_draws": semantics["active"],
+        "slab_strength": slab_norm,
+        "effective_strength": slab_norm * semantics["gate"],
+    }
+
+
+def _truth_mask(decoder, truth):
+    if decoder.selection_mode == "unit_group":
+        n_slots = decoder.H
+        n_true = int(truth["n_true_units"])
+        if n_true > n_slots:
+            raise ValueError("n_true_units exceeds the fitted hidden-unit slots.")
+        mask = np.zeros(n_slots, dtype=bool)
+        mask[:n_true] = True
+        labels = [f"unit_rank_{rank + 1}" for rank in range(n_slots)]
+        return mask, labels
+
+    feature_true = np.asarray(truth["feature_true"], dtype=float).reshape(-1)
+    if feature_true.size != decoder.input_dim:
+        raise ValueError("feature_true length does not match decoder.input_dim.")
+    return feature_true > 0.5, [f"feature_{j}" for j in range(feature_true.size)]
+
+
+def _safe_nan_summary(values, reducer):
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    return float(reducer(finite)) if finite.size else np.nan
+
+
+def grouped_recovery_metrics(
+    rat_decoder,
+    rat_xi,
+    mcmc_decoder,
+    mcmc_xi,
+    truth,
+    min_active_draws=50,
+):
+    """
+    Group-selection recovery against the exactly matched MCMC model.
+
+    ``true_active_skl`` is the VI--MCMC conditional slab-strength SKL on
+    teacher-active features or permutation-invariant unit ranks. It is not a
+    KL divergence from a continuous posterior to a point-valued truth.
+    """
+
+    if rat_decoder.compatibility_signature() != mcmc_decoder.compatibility_signature():
+        raise ValueError("MCMC and VI must use exactly the same grouped decoder.")
+
+    if rat_decoder.selection_mode == "unit_group":
+        rat = _ranked_unit_selection_draws(rat_decoder, rat_xi)
+        mcmc = _ranked_unit_selection_draws(mcmc_decoder, mcmc_xi)
+        target_type = "unit_rank"
+    else:
+        rat = _feature_selection_draws(rat_decoder, rat_xi)
+        mcmc = _feature_selection_draws(mcmc_decoder, mcmc_xi)
+        target_type = "feature"
+
+    truth_active, labels = _truth_mask(rat_decoder, truth)
+    rat_active = rat["pip_draws"].detach().cpu().numpy().astype(bool)
+    mcmc_active = mcmc["pip_draws"].detach().cpu().numpy().astype(bool)
+    rat_strength = rat["slab_strength"].detach().cpu().numpy()
+    mcmc_strength = mcmc["slab_strength"].detach().cpu().numpy()
+    rat_pip = rat_active.mean(axis=0)
+    mcmc_pip = mcmc_active.mean(axis=0)
+    rows = []
+    active_skl = []
+    zero_js = []
+
+    for target, label in enumerate(labels):
+        rat_values = rat_strength[rat_active[:, target], target]
+        mcmc_values = mcmc_strength[mcmc_active[:, target], target]
+        skl = np.nan
+        js = np.nan
+
+        if truth_active[target]:
+            if (
+                rat_values.size >= int(min_active_draws)
+                and mcmc_values.size >= int(min_active_draws)
+            ):
+                skl = _skl(rat_values, mcmc_values)
+            active_skl.append(skl)
+        else:
+            js = bernoulli_js(rat_pip[target], mcmc_pip[target])
+            zero_js.append(js)
+
+        rows.append({
+            "target_type": target_type,
+            "target": target,
+            "label": label,
+            "truth_active": bool(truth_active[target]),
+            "rat_pip": float(rat_pip[target]),
+            "mcmc_pip": float(mcmc_pip[target]),
+            "pip_error": float(rat_pip[target] - mcmc_pip[target]),
+            "conditional_slab_skl": skl,
+            "zero_mass_js": js,
+            "n_rat_active_draws": int(rat_values.size),
+            "n_mcmc_active_draws": int(mcmc_values.size),
+        })
+
+    active_skl = np.asarray(active_skl, dtype=float)
+    zero_js = np.asarray(zero_js, dtype=float)
+    summary = {
+        "pip_rmse_mcmc": float(np.sqrt(np.mean((rat_pip - mcmc_pip) ** 2))),
+        "true_active_skl": _safe_nan_summary(active_skl, np.median),
+        "true_active_skl_mean": _safe_nan_summary(active_skl, np.mean),
+        "zero_js": _safe_nan_summary(zero_js, np.median),
+        "zero_js_mean": _safe_nan_summary(zero_js, np.mean),
+        "n_truth_active": int(truth_active.sum()),
+        "n_truth_zero": int((~truth_active).sum()),
+        "n_valid_true_active_skl": int(np.isfinite(active_skl).sum()),
+        "selection_mode": rat_decoder.selection_mode,
+    }
+    summary["rmse_with_mcmc"] = summary["pip_rmse_mcmc"]
+    summary["true_skl"] = summary["true_active_skl"]
+
+    return summary, pd.DataFrame(rows)
+
+
+@torch.no_grad()
+def true_active_joint_draws(decoder, xi, truth):
+    """
+    Return the two truth-active slab-strength coordinates conditional on both
+    targets being active in the same posterior draw.
+
+    Unit selection uses permutation-invariant ranked units. Feature selection
+    uses the two truth-active raw predictors.
+    """
+
+    if decoder.selection_mode == "unit_group":
+        draws = _ranked_unit_selection_draws(decoder, xi)
+    else:
+        draws = _feature_selection_draws(decoder, xi)
+
+    truth_active, labels = _truth_mask(decoder, truth)
+    active_idx = np.flatnonzero(truth_active)
+    if len(active_idx) != 2:
+        raise ValueError(
+            "true_active_joint_draws requires exactly two truth-active targets."
+        )
+
+    j1, j2 = active_idx
+    active = draws["pip_draws"]
+    strength = draws["slab_strength"]
+    joint_active = active[:, j1] & active[:, j2]
+    values = strength[joint_active][:, [j1, j2]].detach().cpu().numpy()
+
+    return {
+        "values": values,
+        "labels": (labels[j1], labels[j2]),
+        "n_joint_active": int(joint_active.sum().item()),
+        "joint_active_prob": float(joint_active.float().mean().item()),
+    }
+
+
+def plot_true_active_joint_density(
+    rat_decoder,
+    rat_xi,
+    mcmc_decoder,
+    mcmc_xi,
+    truth,
+    min_draws=50,
+    n_grid=100,
+):
+    """Overlay RaT and MCMC 2D KDE contours for two truth-active targets."""
+
+    rat = true_active_joint_draws(rat_decoder, rat_xi, truth)
+    mcmc = true_active_joint_draws(mcmc_decoder, mcmc_xi, truth)
+
+    print(
+        f"joint-active draws: RaT={rat['n_joint_active']}, "
+        f"MCMC={mcmc['n_joint_active']}"
+    )
+    print(
+        f"joint-active probability: RaT={rat['joint_active_prob']:.4f}, "
+        f"MCMC={mcmc['joint_active_prob']:.4f}"
+    )
+
+    if (
+        rat["n_joint_active"] < int(min_draws)
+        or mcmc["n_joint_active"] < int(min_draws)
+    ):
+        print("Joint density not plotted: insufficient joint-active posterior draws.")
+        return None, None
+
+    Xr = rat["values"]
+    Xm = mcmc["values"]
+
+    try:
+        joint_skl = kde_skl_2d(Xr, Xm)
+        print(f"conditional joint SKL: {joint_skl:.4f}")
+    except (ValueError, np.linalg.LinAlgError):
+        print("conditional joint SKL: NA")
+
+    x_all = np.concatenate([Xr[:, 0], Xm[:, 0]])
+    y_all = np.concatenate([Xr[:, 1], Xm[:, 1]])
+    x_lo, x_hi = np.quantile(x_all, [0.005, 0.995])
+    y_lo, y_hi = np.quantile(y_all, [0.005, 0.995])
+    x_pad = 0.10 * (x_hi - x_lo + 1e-8)
+    y_pad = 0.10 * (y_hi - y_lo + 1e-8)
+
+    gx = np.linspace(x_lo - x_pad, x_hi + x_pad, int(n_grid))
+    gy = np.linspace(y_lo - y_pad, y_hi + y_pad, int(n_grid))
+    xx, yy = np.meshgrid(gx, gy)
+    points = np.vstack([xx.ravel(), yy.ravel()])
+
+    try:
+        kde_rat = gaussian_kde(Xr.T)
+        kde_mcmc = gaussian_kde(Xm.T)
+        z_rat = kde_rat(points).reshape(xx.shape)
+        z_mcmc = kde_mcmc(points).reshape(xx.shape)
+    except np.linalg.LinAlgError:
+        print("Joint density not plotted: singular KDE covariance.")
+        return None, None
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.contour(xx, yy, z_rat, levels=6, linestyles="-")
+    ax.contour(xx, yy, z_mcmc, levels=6, linestyles="--")
+    ax.plot([], [], linestyle="-", label="RaT")
+    ax.plot([], [], linestyle="--", label="MCMC")
+    ax.set_xlabel(rat["labels"][0])
+    ax.set_ylabel(rat["labels"][1])
+    ax.set_title("True-active joint posterior density")
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax

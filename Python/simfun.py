@@ -613,3 +613,238 @@ def siminfo(sim_info, digits=4):
     )
 
     return "\n".join(lines)
+
+
+def evaluate_grouped_teacher(X, teacher_or_info, return_units=False):
+    """Evaluate the canonical shallow teacher used by ``simfun_grouped_bnn``."""
+
+    teacher = teacher_or_info.get("teacher", teacher_or_info)
+    X = torch.as_tensor(X)
+    weight = torch.as_tensor(
+        teacher["weight"],
+        device=X.device,
+        dtype=X.dtype,
+    )
+    bias = torch.as_tensor(
+        teacher["bias"],
+        device=X.device,
+        dtype=X.dtype,
+    )
+    amplitude = torch.as_tensor(
+        teacher["amplitude"],
+        device=X.device,
+        dtype=X.dtype,
+    )
+    preactivation = X @ weight.T - bias
+    hidden = F.relu(preactivation)
+    repu_power = teacher.get("repu_power")
+
+    if repu_power is not None:
+        hidden = hidden.pow(float(repu_power))
+
+    units = hidden * amplitude[None, :]
+    signal = units.sum(dim=1) + float(teacher.get("intercept", 0.0))
+
+    if return_units:
+        return signal, units
+    return signal
+
+
+def simfun_grouped_bnn(
+    n=160,
+    p=1,
+    n_active_features=1,
+    n_true_units=3,
+    fit_units=None,
+    active_features=None,
+    unit_specs=None,
+    repu_power=None,
+    sigma2=1.0,
+    x_low=-2.5,
+    x_high=2.5,
+    target_signal_sd=1.5,
+    seed=123,
+    device=None,
+    dtype=torch.float32,
+):
+    """
+    Seeded shallow-teacher simulation for grouped BNN selection.
+
+    The teacher is
+
+        f(x) = beta0 + sum_j a_j ReLU(w_j^T x - b_j)^r,
+
+    with ``r=1`` when ``repu_power=None``. Default units are axis-aligned,
+    have distinct interior breakpoints, and cover every requested active
+    feature. ``unit_specs`` may fix an exact teacher, but those generating
+    units are not uniquely identifiable posterior labels. The returned
+    ``unit_rank_true`` is therefore a permutation-invariant active-unit rank
+    target of length ``fit_units``.
+    """
+
+    n = int(n)
+    p = int(p)
+    n_true_units = int(n_true_units)
+    fit_units = n_true_units + 2 if fit_units is None else int(fit_units)
+    device = torch.device("cpu") if device is None else torch.device(device)
+
+    if not 0 < n_true_units <= fit_units:
+        raise ValueError("Require 1 <= n_true_units <= fit_units.")
+    if sigma2 <= 0:
+        raise ValueError("sigma2 must be positive.")
+    if x_low >= x_high:
+        raise ValueError("x_low must be smaller than x_high.")
+    if repu_power is not None and float(repu_power) <= 0:
+        raise ValueError("repu_power must be positive or None for ReLU.")
+
+    if active_features is None:
+        active_features = list(range(int(n_active_features)))
+    else:
+        active_features = [int(j) for j in active_features]
+
+    if not active_features or len(set(active_features)) != len(active_features):
+        raise ValueError("active_features must be a non-empty unique sequence.")
+    if min(active_features) < 0 or max(active_features) >= p:
+        raise ValueError("active_features contains an index outside 0,...,p-1.")
+    if unit_specs is None and n_true_units < len(active_features):
+        raise ValueError("Default teacher needs at least one unit per active feature.")
+
+    rng = np.random.default_rng(seed)
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    X = (
+        float(x_low)
+        + (float(x_high) - float(x_low))
+        * torch.rand(n, p, generator=generator, device=device, dtype=dtype)
+    )
+
+    if unit_specs is None:
+        assignments = [
+            active_features[j % len(active_features)]
+            for j in range(n_true_units)
+        ]
+        by_feature = {feature: [] for feature in active_features}
+        for unit, feature in enumerate(assignments):
+            by_feature[feature].append(unit)
+
+        breakpoints = np.empty(n_true_units)
+        inner_low = 0.6 * float(x_low)
+        inner_high = 0.6 * float(x_high)
+        for feature, units in by_feature.items():
+            locations = np.linspace(
+                inner_low,
+                inner_high,
+                len(units) + 2,
+            )[1:-1]
+            jitter = rng.uniform(-0.08, 0.08, size=len(units))
+            for unit, location, shift in zip(units, locations, jitter):
+                breakpoints[unit] = location + shift
+
+        degree = 1.0 if repu_power is None else float(repu_power)
+        amplitude_scale = (float(x_high) - float(x_low)) ** (1.0 - degree)
+        unit_specs = []
+        for unit, feature in enumerate(assignments):
+            slope = (-1.0 if unit % 2 else 1.0) * rng.uniform(0.8, 1.25)
+            amplitude = (-1.0 if (unit // 2) % 2 else 1.0)
+            amplitude *= rng.uniform(0.7, 1.3) * amplitude_scale
+            unit_specs.append({
+                "feature": int(feature),
+                "slope": float(slope),
+                "breakpoint": float(breakpoints[unit]),
+                "amplitude": float(amplitude),
+            })
+    else:
+        unit_specs = [dict(item) for item in unit_specs]
+        if len(unit_specs) != n_true_units:
+            raise ValueError("len(unit_specs) must equal n_true_units.")
+
+    weight = np.zeros((n_true_units, p), dtype=float)
+    bias = np.zeros(n_true_units, dtype=float)
+    amplitude = np.zeros(n_true_units, dtype=float)
+    teacher_rows = []
+
+    for unit, item in enumerate(unit_specs):
+        feature = int(item["feature"])
+        slope = float(item["slope"])
+        breakpoint = float(item["breakpoint"])
+        amp = float(item["amplitude"])
+
+        if feature < 0 or feature >= p:
+            raise ValueError("A unit_specs feature is outside 0,...,p-1.")
+        if feature not in active_features:
+            raise ValueError("Every teacher unit must use a declared active feature.")
+        if slope == 0 or amp == 0:
+            raise ValueError("Teacher slopes and amplitudes must be nonzero.")
+        if not x_low < breakpoint < x_high:
+            raise ValueError("Teacher breakpoints must lie inside the X range.")
+
+        weight[unit, feature] = slope
+        bias[unit] = slope * breakpoint
+        amplitude[unit] = amp
+        teacher_rows.append({
+            "teacher_unit": unit,
+            "feature": feature,
+            "slope": slope,
+            "breakpoint": breakpoint,
+            "bias": bias[unit],
+            "amplitude": amp,
+        })
+
+    teacher = {
+        "weight": weight.tolist(),
+        "bias": bias.tolist(),
+        "amplitude": amplitude.tolist(),
+        "intercept": 0.0,
+        "repu_power": None if repu_power is None else float(repu_power),
+    }
+    raw_signal = evaluate_grouped_teacher(X, teacher)
+
+    if target_signal_sd is not None:
+        raw_sd = float(raw_signal.std(unbiased=False))
+        if raw_sd <= 1e-8:
+            raise ValueError("Generated teacher signal is degenerate.")
+        scale = float(target_signal_sd) / raw_sd
+        teacher["amplitude"] = (amplitude * scale).tolist()
+        for row in teacher_rows:
+            row["amplitude"] *= scale
+
+    signal = evaluate_grouped_teacher(X, teacher)
+    noise = math.sqrt(float(sigma2)) * torch.randn(
+        n,
+        generator=generator,
+        device=device,
+        dtype=dtype,
+    )
+    y = signal + noise
+    feature_true = torch.zeros(p, device=device, dtype=dtype)
+    feature_true[active_features] = 1.0
+    unit_rank_true = torch.zeros(fit_units, device=device, dtype=dtype)
+    unit_rank_true[:n_true_units] = 1.0
+
+    signal_var = float(signal.var(unbiased=False))
+    sim_info = {
+        "sim": "canonical_shallow_group_bnn",
+        "seed": int(seed),
+        "family": "gaussian",
+        "n": n,
+        "p": p,
+        "sigma2": float(sigma2),
+        "sigma": math.sqrt(float(sigma2)),
+        "signal_var": signal_var,
+        "snr": signal_var / float(sigma2),
+        "x_range": (float(x_low), float(x_high)),
+        "active_idx": np.asarray(active_features, dtype=int),
+        "feature_true": feature_true.detach().cpu().numpy(),
+        "n_true_units": n_true_units,
+        "fit_units": fit_units,
+        "unit_rank_true": unit_rank_true.detach().cpu().numpy(),
+        "teacher_units": teacher_rows,
+        "teacher": teacher,
+        "repu_power": None if repu_power is None else float(repu_power),
+        "unit_truth_identification": (
+            "canonical teacher representation only; posterior unit labels are "
+            "permutation/scale non-identifiable, so evaluate ranked unit slots"
+        ),
+    }
+
+    return X, y, feature_true, unit_rank_true, signal, sim_info

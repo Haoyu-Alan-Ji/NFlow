@@ -14,7 +14,7 @@ def run_bnn_mcmc(
     print_every=500,
 ):
     """
-    Coordinate-wise elliptical slice sampling for N(0, I) semantic
+    Coordinate-wise elliptical slice sampling for N(0, I) continuous LVR
     coordinates. The likelihood and decoder are taken directly from model, so
     MCMC and VI use exactly the same forward path and observation model.
     """
@@ -91,6 +91,13 @@ def run_bnn_mcmc(
         "family": model.family,
         "sigma2": float(model.sigma2.item()),
         "decoder": type(model.decoder).__name__,
+        "selection_mode": getattr(model.decoder, "selection_mode", "edge"),
+        "latent_dim": int(d),
+        "decoder_signature": (
+            model.decoder.compatibility_signature()
+            if hasattr(model.decoder, "compatibility_signature")
+            else None
+        ),
     }
 
 
