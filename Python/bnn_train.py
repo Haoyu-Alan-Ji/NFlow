@@ -773,22 +773,38 @@ def train_grouped_bnn(
     gate_tau=None,
     repu_power=None,
     linear_skip=False,
-    epochs=6000,
+    epochs=2500,
     lr=3e-4,
     R_train=64,
     R_eval=1000,
     R_final=5000,
     eval_every=250,
+    selection_warmup_epochs=1000,
+    init_loc_jitter=0.05,
+    endpoint="last",
+    checkpoint_metric=None,
     grad_clip=5.0,
     min_active_draws=50,
     zero_tol=1e-6,
     constant_tol=1e-6,
     seed=123,
 ):
-    """Train the single-group/single-ReLU-gate shallow BNN."""
+    """
+    Train the grouped BNN and return one posterior endpoint.
+
+    During selection warmup, the likelihood sees every group gate fixed at 1;
+    log_q and log_prior still use the unmodified posterior draw. If requested,
+    checkpoint_metric names a history column to maximize after warmup.
+    """
 
     if selection_mode not in {"unit_group", "feature_group"}:
         raise ValueError("Use train_edge_bnn for selection_mode='edge'.")
+    if endpoint not in {"last", "checkpoint"}:
+        raise ValueError("endpoint must be 'last' or 'checkpoint'.")
+    if endpoint == "checkpoint" and checkpoint_metric is None:
+        raise ValueError("checkpoint_metric is required for endpoint='checkpoint'.")
+    if not 0 <= int(selection_warmup_epochs) < int(epochs):
+        raise ValueError("selection_warmup_epochs must be in [0, epochs).")
 
     random.seed(seed)
     np.random.seed(seed)
@@ -838,32 +854,66 @@ def train_grouped_bnn(
     if model.decoder.compatibility_signature() != mcmc_decoder.compatibility_signature():
         raise ValueError("MCMC and VI must use exactly the same grouped decoder.")
 
+    if float(init_loc_jitter) > 0:
+        with torch.no_grad():
+            model.q0.loc.add_(
+                float(init_loc_jitter) * torch.randn_like(model.q0.loc)
+            )
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     history = []
     group_history = []
     unit_history = []
-    best_r2 = -np.inf
+    best_score = -np.inf
     best_epoch = None
     best_state = None
 
     for epoch in range(1, int(epochs) + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        train_terms = model.elbo_draws(R_train)
-        loss = -train_terms["elbo"].mean()
+
+        selection_warmup = epoch <= int(selection_warmup_epochs)
+        if selection_warmup:
+            xi_train, log_q_train = model.sample_posterior(R_train)
+            xi_like = xi_train.clone()
+            u0 = model.decoder.s_dim
+            u1 = u0 + model.decoder.u_dim
+            t = xi_train[:, u1:u1 + model.decoder.t_dim]
+            xi_like[:, u0:u1] = t + 1.0
+            log_likelihood_train = model.log_likelihood(xi_like)
+            log_prior_train = model.log_prior(xi_train)
+            loss = -(
+                log_likelihood_train + log_prior_train - log_q_train
+            ).mean()
+        else:
+            train_terms = model.elbo_draws(R_train)
+            loss = -train_terms["elbo"].mean()
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
-        if epoch != 1 and epoch % int(eval_every) != 0:
+        if (
+            epoch != 1
+            and epoch % int(eval_every) != 0
+            and epoch != int(epochs)
+        ):
             continue
 
         model.eval()
         with torch.no_grad():
             xi_eval, log_q_eval = model.sample_posterior(R_eval)
-            log_likelihood = model.log_likelihood(xi_eval)
+            xi_eval_like = xi_eval
+            if selection_warmup:
+                xi_eval_like = xi_eval.clone()
+                u0 = model.decoder.s_dim
+                u1 = u0 + model.decoder.u_dim
+                t = xi_eval[:, u1:u1 + model.decoder.t_dim]
+                xi_eval_like[:, u0:u1] = t + 1.0
+
+            log_likelihood = model.log_likelihood(xi_eval_like)
             log_prior = model.log_prior(xi_eval)
-            pred_eval = model.decoder(X_eval, xi_eval)
+            pred_eval = model.decoder(X_eval, xi_eval_like)
 
         function = metric.function_recovery_metrics(
             signal=signal_eval,
@@ -888,6 +938,12 @@ def train_grouped_bnn(
         )
         row = {
             "epoch": epoch,
+            "phase": "repr" if selection_warmup else "select",
+            "selection_warmup": selection_warmup,
+            "eligible_checkpoint": (
+                checkpoint_metric is not None and not selection_warmup
+            ),
+            "checkpoint_update": False,
             "loss": float(loss.detach()),
             "expected_log_likelihood": float(log_likelihood.mean()),
             "expected_log_prior": float(log_prior.mean()),
@@ -897,32 +953,48 @@ def train_grouped_bnn(
             **function,
             **recovery,
         }
+
+        if row["eligible_checkpoint"]:
+            score = float(row[checkpoint_metric])
+            if np.isfinite(score) and score > best_score:
+                best_score = score
+                best_epoch = epoch
+                best_state = copy.deepcopy(model.state_dict())
+                row["checkpoint_update"] = True
+
         history.append(row)
         group_history.extend(groups.to_dict("records"))
         unit_history.extend(units.to_dict("records"))
 
-        if row["val_signal_r2"] > best_r2:
-            best_r2 = row["val_signal_r2"]
-            best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
-
+        selection_text = "" if selection_warmup else (
+            f" pipTruth={row['pip_rmse_truth']:.4f}"
+            f" activeSKL={row['true_active_skl']:.4f}"
+        )
+        marker = " *" if row["checkpoint_update"] else ""
         print(
             f"epoch={epoch:04d} "
-            f"valR2={row['val_signal_r2']:.4f} "
-            f"pipRMSE={row['pip_rmse_mcmc']:.4f} "
-            f"trueSKL={row['true_active_skl']:.4f} "
-            f"zeroJS={row['zero_js']:.4f}"
+            f"phase={row['phase']:6s} "
+            f"valR2={row['val_signal_r2']:.4f}"
+            f"{selection_text}"
+            f"{marker}"
         )
 
-    if best_state is None:
-        raise RuntimeError("No evaluation checkpoint was produced.")
+    last_state = copy.deepcopy(model.state_dict())
+    if endpoint == "checkpoint":
+        if best_state is None:
+            raise RuntimeError("No post-warmup checkpoint was produced.")
+        model.load_state_dict(best_state)
+        endpoint_epoch = best_epoch
+    else:
+        model.load_state_dict(last_state)
+        endpoint_epoch = int(epochs)
 
-    model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
         xi_final, log_q_final = model.sample_posterior(R_final)
         final_log_likelihood = model.log_likelihood(xi_final)
         final_log_prior = model.log_prior(xi_final)
+        val_pred = metric.predict_draws(model.decoder, X_eval, xi_final)
         rat_pred = metric.predict_draws(model.decoder, X_final, xi_final)
         mcmc_pred = metric.predict_draws(mcmc_decoder, X_final, mcmc_xi)
 
@@ -933,6 +1005,13 @@ def train_grouped_bnn(
         mcmc_xi=mcmc_xi,
         truth=truth,
         min_active_draws=min_active_draws,
+    )
+    endpoint_function = metric.function_recovery_metrics(
+        signal=signal_eval,
+        pred_draws=val_pred,
+        prefix="endpoint_val",
+        zero_tol=zero_tol,
+        constant_tol=constant_tol,
     )
     rat_function = metric.function_recovery_metrics(
         signal=signal_final,
@@ -949,8 +1028,15 @@ def train_grouped_bnn(
         constant_tol=constant_tol,
     )
     summary = {
-        "best_epoch": best_epoch,
-        "best_val_signal_r2": best_r2,
+        "endpoint": endpoint,
+        "endpoint_epoch": endpoint_epoch,
+        "checkpoint_metric": checkpoint_metric,
+        "checkpoint_epoch": best_epoch,
+        "checkpoint_score": (
+            None if best_state is None else float(best_score)
+        ),
+        "best_epoch": endpoint_epoch,
+        "best_val_signal_r2": endpoint_function["endpoint_val_signal_r2"],
         "expected_log_likelihood": float(final_log_likelihood.mean()),
         "expected_log_prior": float(final_log_prior.mean()),
         "expected_log_q": float(log_q_final.mean()),
@@ -958,19 +1044,20 @@ def train_grouped_bnn(
         "elbo": float(
             (final_log_likelihood + final_log_prior - log_q_final).mean()
         ),
+        **endpoint_function,
         **recovery,
         **rat_function,
         **mcmc_function,
     }
 
     rat_groups = metric.group_posterior_summary(
-        model.decoder, xi_final, method="RaT", epoch=best_epoch
+        model.decoder, xi_final, method="RaT", epoch=endpoint_epoch
     )
     mcmc_groups = metric.group_posterior_summary(
         mcmc_decoder, mcmc_xi, method="MCMC"
     )
     rat_units = metric.unit_group_summary(
-        model.decoder, xi_final, method="RaT", epoch=best_epoch
+        model.decoder, xi_final, method="RaT", epoch=endpoint_epoch
     )
     mcmc_units = metric.unit_group_summary(
         mcmc_decoder, mcmc_xi, method="MCMC"
@@ -1012,7 +1099,12 @@ def train_grouped_bnn(
             "R_train": int(R_train),
             "R_eval": int(R_eval),
             "R_final": int(R_final),
+            "eval_every": int(eval_every),
             "epochs": int(epochs),
+            "selection_warmup_epochs": int(selection_warmup_epochs),
+            "init_loc_jitter": float(init_loc_jitter),
+            "endpoint": endpoint,
+            "checkpoint_metric": checkpoint_metric,
             "seed": int(seed),
         },
     }

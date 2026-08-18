@@ -1812,8 +1812,12 @@ def grouped_recovery_metrics(
             "target": target,
             "label": label,
             "truth_active": bool(truth_active[target]),
+            "truth_pip": float(truth_active[target]),
             "rat_pip": float(rat_pip[target]),
             "mcmc_pip": float(mcmc_pip[target]),
+            "pip_error_truth": float(
+                rat_pip[target] - truth_active[target]
+            ),
             "pip_error": float(rat_pip[target] - mcmc_pip[target]),
             "conditional_slab_skl": skl,
             "zero_mass_js": js,
@@ -1824,6 +1828,9 @@ def grouped_recovery_metrics(
     active_skl = np.asarray(active_skl, dtype=float)
     zero_js = np.asarray(zero_js, dtype=float)
     summary = {
+        "pip_rmse_truth": float(
+            np.sqrt(np.mean((rat_pip - truth_active.astype(float)) ** 2))
+        ),
         "pip_rmse_mcmc": float(np.sqrt(np.mean((rat_pip - mcmc_pip) ** 2))),
         "true_active_skl": _safe_nan_summary(active_skl, np.median),
         "true_active_skl_mean": _safe_nan_summary(active_skl, np.mean),
