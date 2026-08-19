@@ -1,3 +1,6 @@
+
+
+
 import math
 import torch
 import torch.nn as nn
@@ -1155,13 +1158,14 @@ class LaSTBNNVI(nn.Module):
 
         return xi, log_q
 
-    def log_likelihood(self, xi, X=None, y=None):
+    def log_likelihood(self, xi, X=None, y=None, **decoder_kwargs):
         X = self.X if X is None else X
         y = self.y if y is None else y
 
         pred = self.decoder(
             X,
             xi,
+            **decoder_kwargs,
         )
 
         if self.family == "gaussian":
@@ -1559,18 +1563,18 @@ class GroupLayout:
 
 class GroupGateDecoder(nn.Module):
     """
-    Clean shallow grouped BNN with plain-ReLU LVR gates.
+    Clean shallow grouped BNN with one LVR gate per selectable group.
 
     Unit mode uses one gate per hidden unit and applies it exactly once to the
     unit contribution:
 
         f(x) = beta0 + sum_j g_j W2[:,j] ReLU(W1[j,:] x + b1[j])
-        g_j  = ReLU(u_j - t)
+        g_j  = G(u_j - t)
 
-    This is the continuous relaxation of one idempotent hard unit indicator
-    I_j. W1/b1/W2 are still one statistical group, but the relaxed gate is not
-    mechanically multiplied into every parameter location (which would create
-    an artificial g_j^2 term).
+    The hard model contains one idempotent unit indicator I_j. After using
+    I_j^2 = I_j, that consolidated indicator is relaxed once via G. Supported
+    maps are RePU, G(m)=(m_+)^power, and normalized RePU,
+    G(m)=(m_+)^power/(tau^power+(m_+)^power).
 
     Feature mode is unchanged conceptually: one gate per raw predictor is
     applied to its W1 column (and ell column when linear_skip=True).
@@ -1597,14 +1601,10 @@ class GroupGateDecoder(nn.Module):
         self.repu_power = repu_power
         self.linear_skip = bool(linear_skip)
 
-        # The current grouped baseline is deliberately ReLU-only. Keep these
-        # arguments in the API so the existing notebook remains compatible,
-        # but reject accidental RePU/normalized-gate configurations.
-        if self.gate_power != 1.0 or self.gate_tau is not None:
-            raise ValueError(
-                "GroupedBNNVI currently uses the plain ReLU gate only: "
-                "gate_power=1.0 and gate_tau=None."
-            )
+        if self.gate_power <= 0.0:
+            raise ValueError("gate_power must be positive.")
+        if self.gate_tau is not None and self.gate_tau <= 0.0:
+            raise ValueError("gate_tau must be positive or None.")
         if self.repu_power is not None:
             raise ValueError(
                 "GroupedBNNVI currently uses ordinary ReLU hidden activation; "
@@ -1646,7 +1646,12 @@ class GroupGateDecoder(nn.Module):
         return F.relu(x)
 
     def group_gate(self, margin):
-        return F.relu(margin)
+        positive = F.relu(margin).pow(self.gate_power)
+        if self.gate_tau is None:
+            return positive
+        return positive / (
+            self.gate_tau ** self.gate_power + positive
+        )
 
     def split_latent(self, xi):
         s = xi[:, :self.s_dim]
@@ -1719,11 +1724,17 @@ class GroupGateDecoder(nn.Module):
         return_summary=False,
         beta_eps=0.05,
         sigmoid_active_threshold=0.5,
+        force_all_on=False,
     ):
         del beta_eps, sigmoid_active_threshold
         R = xi.shape[0]
         s, _, _ = self.split_latent(xi)
         semantics = self.group_semantics(xi)
+        likelihood_gate = (
+            torch.ones_like(semantics["gate"])
+            if force_all_on
+            else semantics["gate"]
+        )
         params = {}
 
         for item in self.param_specs:
@@ -1738,7 +1749,7 @@ class GroupGateDecoder(nn.Module):
                 selected = group_ids >= 0
                 if selected.any():
                     safe_ids = group_ids.clamp_min(0)
-                    selected_gates = semantics["gate"].index_select(1, safe_ids)
+                    selected_gates = likelihood_gate.index_select(1, safe_ids)
                     gates = torch.where(
                         selected[None, :],
                         selected_gates,
@@ -1756,7 +1767,9 @@ class GroupGateDecoder(nn.Module):
                 "t_mean": semantics["t"].mean(dim=0),
                 "t_sd": semantics["t"].std(dim=0),
                 "selection_mode": self.selection_mode,
-                "gate_type": "relu",
+                "gate_type": (
+                    "repu" if self.gate_tau is None else "normalized_repu"
+                ),
                 "gate_power": self.gate_power,
                 "gate_tau": self.gate_tau,
                 "repu_power": self.repu_power,
@@ -1796,8 +1809,8 @@ class GroupGateDecoder(nn.Module):
     def flow_dependency_pairs(self):
         return self.layout.dependency_pairs
 
-    def forward(self, X, xi):
-        params = self.unpack(xi)
+    def forward(self, X, xi, force_all_on=False):
+        params = self.unpack(xi, force_all_on=force_all_on)
         semantics = self.group_semantics(xi)
         R = xi.shape[0]
         n = X.shape[0]
@@ -1809,9 +1822,13 @@ class GroupGateDecoder(nn.Module):
         hidden = self.activate(hidden)
 
         if self.selection_mode == "unit_group":
-            # One ReLU gate per unit, used exactly once. This is the relaxed
-            # analogue of I_j^k = I_j for a single hard unit indicator.
-            hidden = hidden * semantics["gate"][:, None, :]
+            # One consolidated gate per unit, applied exactly once.
+            gate = (
+                torch.ones_like(semantics["gate"])
+                if force_all_on
+                else semantics["gate"]
+            )
+            hidden = hidden * gate[:, None, :]
 
         out = torch.bmm(hidden, params["W2"].transpose(1, 2))
 
