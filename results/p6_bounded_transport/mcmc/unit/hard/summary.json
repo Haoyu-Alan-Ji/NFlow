@@ -1,0 +1,137 @@
+{
+  "burnin": 1000,
+  "thin": 1,
+  "n_kept": 5000,
+  "family": "gaussian",
+  "sigma2": 1.0,
+  "decoder": "GroupGateDecoder",
+  "selection_mode": "unit_group",
+  "latent_dim": 47,
+  "decoder_signature": [
+    "group_activation_multilayer_v2",
+    "unit_group",
+    "stacked",
+    [
+      5
+    ],
+    null,
+    [
+      [
+        "beta0",
+        [
+          1
+        ],
+        "output"
+      ],
+      [
+        "W1",
+        [
+          5,
+          6
+        ],
+        "hidden_weight"
+      ],
+      [
+        "b1",
+        [
+          5
+        ],
+        "hidden_bias"
+      ],
+      [
+        "W2",
+        [
+          1,
+          5
+        ],
+        "output_weight"
+      ]
+    ],
+    null,
+    0,
+    "hard",
+    1.0,
+    null,
+    1.0
+  ],
+  "n_chains": 4,
+  "draws_per_chain": 5000,
+  "chain_seeds": [
+    1123,
+    2132,
+    3141,
+    4150
+  ],
+  "chain_sampling_time_sec": [
+    133.97570650000125,
+    120.20337989996187,
+    121.97463790001348,
+    120.31188870000187
+  ],
+  "sampling_time_sec": 496.4656129999785,
+  "wall_time_sec": 496.4742726999102,
+  "sec_per_iteration": 0.020686067208332437,
+  "diagnostics": {
+    "n_chains": 4,
+    "draws_per_chain": 5000,
+    "threshold": {
+      "variable": "threshold_0",
+      "mean": -0.031061723346970528,
+      "sd": 0.583008046640075,
+      "rhat": 1.003737480006682,
+      "ess": 1277.4956989443808,
+      "mcse": 0.016311534746991523,
+      "quantity": "derived"
+    },
+    "active_count": {
+      "variable": "active_count",
+      "mean": 2.5215,
+      "sd": 0.7201136564348466,
+      "rhat": 1.0040627182694601,
+      "ess": 698.1678097969736,
+      "mcse": 0.027253427995219216,
+      "quantity": "derived"
+    },
+    "pooled_pip": {
+      "unit_rank_1": 1.0,
+      "unit_rank_2": 1.0,
+      "unit_rank_3": 0.40315,
+      "unit_rank_4": 0.1022,
+      "unit_rank_5": 0.01615
+    },
+    "chain_pip": {
+      "chain_1": {
+        "unit_rank_1": 1.0,
+        "unit_rank_2": 1.0,
+        "unit_rank_3": 0.3856,
+        "unit_rank_4": 0.1056,
+        "unit_rank_5": 0.0192
+      },
+      "chain_2": {
+        "unit_rank_1": 1.0,
+        "unit_rank_2": 1.0,
+        "unit_rank_3": 0.4026,
+        "unit_rank_4": 0.1114,
+        "unit_rank_5": 0.0168
+      },
+      "chain_3": {
+        "unit_rank_1": 1.0,
+        "unit_rank_2": 1.0,
+        "unit_rank_3": 0.4624,
+        "unit_rank_4": 0.1226,
+        "unit_rank_5": 0.0166
+      },
+      "chain_4": {
+        "unit_rank_1": 1.0,
+        "unit_rank_2": 1.0,
+        "unit_rank_3": 0.362,
+        "unit_rank_4": 0.0692,
+        "unit_rank_5": 0.012
+      }
+    },
+    "max_latent_rhat": 1.5184462726068455,
+    "min_latent_ess": 7.155475170685438,
+    "max_predictive_rhat": 1.0020762294021683,
+    "min_predictive_ess": 1638.6688630724216
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "burnin": 1000,
+  "thin": 1,
+  "n_kept": 5000,
+  "sampling_time_sec": 85.8806642999989,
+  "sec_per_iteration": 0.014313444049999817,
+  "family": "gaussian",
+  "sigma2": 1.0,
+  "decoder": "GroupGateDecoder",
+  "selection_mode": "unit_group",
+  "latent_dim": 22,
+  "decoder_signature": [
+    "group_activation_multilayer_v2",
+    "unit_group",
+    "stacked",
+    [
+      5
+    ],
+    null,
+    [
+      [
+        "beta0",
+        [
+          1
+        ],
+        "output"
+      ],
+      [
+        "W1",
+        [
+          5,
+          1
+        ],
+        "hidden_weight"
+      ],
+      [
+        "b1",
+        [
+          5
+        ],
+        "hidden_bias"
+      ],
+      [
+        "W2",
+        [
+          1,
+          5
+        ],
+        "output_weight"
+      ]
+    ],
+    null,
+    0,
+    "requ",
+    2.0,
+    null,
+    1.0
+  ]
+}

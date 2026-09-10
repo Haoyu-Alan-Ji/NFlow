@@ -1,0 +1,17 @@
+p=6 bounded transport 自动总结
+
+- function MSE: smooth_step 的跨模式/transport中位数更低（normalized_requ=0.0756878, smooth_step=0.0567571）。
+- active marginal SKL: normalized_requ 的跨模式/transport中位数更低（normalized_requ=0.512177, smooth_step=0.844534）。
+- joint SKL: normalized_requ 的跨模式/transport中位数更低（normalized_requ=1.16737, smooth_step=2.16671）。
+- spline稳定性: active SKL改善3/4，joint SKL改善3/4，function MSE改善1/4；训练时间中位比 spline/affine=1.375。
+- spline成本判断: posterior density 的改善较一致，可结合上述时间倍率认为值得保留。
+- Unit ranked PIP（VI | matched MCMC）:
+  normalized_requ+affine: (1.000,1.000,0.239,0.023,0.001) | (1.000,1.000,0.807,0.469,0.153)
+  normalized_requ+spline: (1.000,1.000,0.411,0.091,0.009) | (1.000,1.000,0.807,0.469,0.153)
+  smooth_step+affine: (1.000,1.000,0.121,0.013,0.001) | (1.000,1.000,0.722,0.339,0.084)
+  smooth_step+spline: (1.000,1.000,0.405,0.076,0.005) | (1.000,1.000,0.722,0.339,0.084)
+- Feature selection: x0/x3 PIP范围=1.000–1.000；inactive PIP最大值=0.117；结构选择稳定。
+- Attention heads: 两个head的平均绝对权重差为 shift=0.067404, scale/shape=0.0680715；存在可见的不同interaction pattern。不预设head语义。
+- Spline numerical check: nonfinite总数=0，最大inverse error=1.15037e-05。
+- MCMC diagnostics: threshold最大R-hat=1.0390，active-count最大R-hat=1.0076，predictive最大R-hat=1.0056，predictive最小ESS=1099.5。
+- 进入multi-layer阶段的暂定组合: normalized_requ + spline。选择顺序是joint density、active marginal、function recovery、cost，没有构造composite score，也没有使用unit PIP RMSE选冠军。

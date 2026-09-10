@@ -1,0 +1,408 @@
+=== MLP grouped-selection experiment ===
+device=cpu
+output_dir=D:\positron\NFlow\results\mlp_group_selection
+requested_stage=1
+n_configurations=6
+hidden_dims=(5, 5)
+deep_hidden_dims=(6, 5, 4)
+selection_modes=('feature_group', 'feature_unit_induced_edge', 'edge_group')
+coupling=spline; conditioner=improved_separate_attention
+
+=== [1/6] stage1__stacked__feature_group__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=11233 ---
+chain=1 mcmc_iter=00001 loglik=-336.286
+chain=1 mcmc_iter=00600 loglik=-187.868
+chain=1 mcmc_iter=01200 loglik=-188.644
+chain=1 mcmc_iter=01800 loglik=-190.539
+chain=1 mcmc_iter=02400 loglik=-190.825
+chain=1 mcmc_iter=03000 loglik=-188.411
+chain=1 mcmc_iter=03600 loglik=-191.292
+chain=1 mcmc_iter=04200 loglik=-188.294
+chain=1 mcmc_iter=04800 loglik=-188.180
+chain=1 mcmc_iter=05400 loglik=-193.402
+chain=1 mcmc_iter=06000 loglik=-189.955
+--- MCMC chain 2/4; seed=12242 ---
+chain=2 mcmc_iter=00001 loglik=-321.426
+chain=2 mcmc_iter=00600 loglik=-191.896
+chain=2 mcmc_iter=01200 loglik=-189.837
+chain=2 mcmc_iter=01800 loglik=-189.638
+chain=2 mcmc_iter=02400 loglik=-189.928
+chain=2 mcmc_iter=03000 loglik=-190.437
+chain=2 mcmc_iter=03600 loglik=-185.464
+chain=2 mcmc_iter=04200 loglik=-185.462
+chain=2 mcmc_iter=04800 loglik=-189.552
+chain=2 mcmc_iter=05400 loglik=-191.514
+chain=2 mcmc_iter=06000 loglik=-202.151
+--- MCMC chain 3/4; seed=13251 ---
+chain=3 mcmc_iter=00001 loglik=-328.102
+chain=3 mcmc_iter=00600 loglik=-189.267
+chain=3 mcmc_iter=01200 loglik=-192.328
+chain=3 mcmc_iter=01800 loglik=-185.667
+chain=3 mcmc_iter=02400 loglik=-186.878
+chain=3 mcmc_iter=03000 loglik=-193.875
+chain=3 mcmc_iter=03600 loglik=-192.332
+chain=3 mcmc_iter=04200 loglik=-192.765
+chain=3 mcmc_iter=04800 loglik=-186.948
+chain=3 mcmc_iter=05400 loglik=-185.450
+chain=3 mcmc_iter=06000 loglik=-188.202
+--- MCMC chain 4/4; seed=14260 ---
+chain=4 mcmc_iter=00001 loglik=-247.262
+chain=4 mcmc_iter=00600 loglik=-186.903
+chain=4 mcmc_iter=01200 loglik=-190.024
+chain=4 mcmc_iter=01800 loglik=-200.007
+chain=4 mcmc_iter=02400 loglik=-186.688
+chain=4 mcmc_iter=03000 loglik=-194.619
+chain=4 mcmc_iter=03600 loglik=-189.929
+chain=4 mcmc_iter=04200 loglik=-192.523
+chain=4 mcmc_iter=04800 loglik=-188.246
+chain=4 mcmc_iter=05400 loglik=-190.582
+chain=4 mcmc_iter=06000 loglik=-189.408
+epoch=0001 phase=repr   valR2=-1.0891
+epoch=0250 phase=repr   valR2=0.9566
+epoch=0500 phase=repr   valR2=0.9769
+epoch=0750 phase=select valR2=0.9774 pipTruth=0.2503 activeSKL=1.8835
+epoch=1000 phase=select valR2=0.9772 pipTruth=0.1610 activeSKL=1.8495
+epoch=1250 phase=select valR2=0.9857 pipTruth=0.1368 activeSKL=1.7144
+epoch=1500 phase=select valR2=0.9794 pipTruth=0.1828 activeSKL=1.7218
+epoch=1750 phase=select valR2=0.9878 pipTruth=0.1326 activeSKL=1.4368
+epoch=2000 phase=select valR2=0.9758 pipTruth=0.1485 activeSKL=0.9298
+joint-active draws: VI=5000, MCMC=20000
+joint-active probability: VI=1.0000, MCMC=1.0000
+joint-density draws used: VI=2000, MCMC=2000
+conditional joint SKL: 2.4082
+                                            config_id  stage architecture hidden_dims embedding_dim selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__stacked__feature_group__normalized_requ__h5x5      1      stacked         5x5          None  feature_group normalized_requ             1.0         feature        spline improved_separate_attention           4                2            8 240  6             0;3 11233       0.074378         0.039379    0.947053 0.001624   2.408178              feature_density                       0.454233                         0.475683                 60      261.858157    1044.114214                    False                              False
+
+=== [2/6] stage1__stacked__feature_unit_induced_edge__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=11333 ---
+chain=1 mcmc_iter=00001 loglik=-357.842
+chain=1 mcmc_iter=00600 loglik=-189.779
+chain=1 mcmc_iter=01200 loglik=-194.335
+chain=1 mcmc_iter=01800 loglik=-195.171
+chain=1 mcmc_iter=02400 loglik=-192.256
+chain=1 mcmc_iter=03000 loglik=-194.571
+chain=1 mcmc_iter=03600 loglik=-195.083
+chain=1 mcmc_iter=04200 loglik=-190.282
+chain=1 mcmc_iter=04800 loglik=-188.469
+chain=1 mcmc_iter=05400 loglik=-187.988
+chain=1 mcmc_iter=06000 loglik=-191.705
+--- MCMC chain 2/4; seed=12342 ---
+chain=2 mcmc_iter=00001 loglik=-435.816
+chain=2 mcmc_iter=00600 loglik=-195.983
+chain=2 mcmc_iter=01200 loglik=-190.758
+chain=2 mcmc_iter=01800 loglik=-188.821
+chain=2 mcmc_iter=02400 loglik=-189.337
+chain=2 mcmc_iter=03000 loglik=-190.321
+chain=2 mcmc_iter=03600 loglik=-191.766
+chain=2 mcmc_iter=04200 loglik=-191.493
+chain=2 mcmc_iter=04800 loglik=-189.642
+chain=2 mcmc_iter=05400 loglik=-186.640
+chain=2 mcmc_iter=06000 loglik=-187.586
+--- MCMC chain 3/4; seed=13351 ---
+chain=3 mcmc_iter=00001 loglik=-326.345
+chain=3 mcmc_iter=00600 loglik=-190.047
+chain=3 mcmc_iter=01200 loglik=-192.951
+chain=3 mcmc_iter=01800 loglik=-188.653
+chain=3 mcmc_iter=02400 loglik=-192.862
+chain=3 mcmc_iter=03000 loglik=-191.654
+chain=3 mcmc_iter=03600 loglik=-194.995
+chain=3 mcmc_iter=04200 loglik=-186.526
+chain=3 mcmc_iter=04800 loglik=-187.736
+chain=3 mcmc_iter=05400 loglik=-189.511
+chain=3 mcmc_iter=06000 loglik=-189.131
+--- MCMC chain 4/4; seed=14360 ---
+chain=4 mcmc_iter=00001 loglik=-312.561
+chain=4 mcmc_iter=00600 loglik=-195.508
+chain=4 mcmc_iter=01200 loglik=-190.779
+chain=4 mcmc_iter=01800 loglik=-188.671
+chain=4 mcmc_iter=02400 loglik=-190.617
+chain=4 mcmc_iter=03000 loglik=-190.136
+chain=4 mcmc_iter=03600 loglik=-190.146
+chain=4 mcmc_iter=04200 loglik=-189.688
+chain=4 mcmc_iter=04800 loglik=-192.361
+chain=4 mcmc_iter=05400 loglik=-191.777
+chain=4 mcmc_iter=06000 loglik=-191.262
+epoch=0001 phase=repr   valR2=-1.1894
+epoch=0250 phase=repr   valR2=0.9743
+epoch=0500 phase=repr   valR2=0.9725
+epoch=0750 phase=select valR2=0.9515 pipMCMC=0.1568 activeSKL=0.8473
+epoch=1000 phase=select valR2=0.9719 pipMCMC=0.3109 activeSKL=4.7736
+epoch=1250 phase=select valR2=0.9663 pipMCMC=0.3520 activeSKL=7.9545
+epoch=1500 phase=select valR2=0.9829 pipMCMC=0.3078 activeSKL=7.7047
+epoch=1750 phase=select valR2=0.9294 pipMCMC=0.3611 activeSKL=9.2341
+epoch=2000 phase=select valR2=0.9852 pipMCMC=0.3303 activeSKL=7.4753
+joint-active draws: VI=5000, MCMC=20000
+joint-active probability: VI=1.0000, MCMC=1.0000
+joint-density draws used: VI=2000, MCMC=2000
+conditional joint SKL: 1.9338
+                                                        config_id  stage architecture hidden_dims embedding_dim            selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__stacked__feature_unit_induced_edge__normalized_requ__h5x5      1      stacked         5x5          None feature_unit_induced_edge normalized_requ             1.0    feature;unit        spline improved_separate_attention           4                2            8 240  6             0;3 11333       0.042536         0.045257    6.175231  0.01988   1.933828         induced_edge_density                       0.238843                         0.647548                 60      306.576119    1659.874605                    False                              False
+
+=== [3/6] stage1__stacked__edge_group__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=11433 ---
+chain=1 mcmc_iter=00001 loglik=-334.396
+chain=1 mcmc_iter=00600 loglik=-189.512
+chain=1 mcmc_iter=01200 loglik=-190.552
+chain=1 mcmc_iter=01800 loglik=-193.517
+chain=1 mcmc_iter=02400 loglik=-190.395
+chain=1 mcmc_iter=03000 loglik=-195.373
+chain=1 mcmc_iter=03600 loglik=-189.271
+chain=1 mcmc_iter=04200 loglik=-189.525
+chain=1 mcmc_iter=04800 loglik=-187.324
+chain=1 mcmc_iter=05400 loglik=-188.838
+chain=1 mcmc_iter=06000 loglik=-194.260
+--- MCMC chain 2/4; seed=12442 ---
+chain=2 mcmc_iter=00001 loglik=-681.886
+chain=2 mcmc_iter=00600 loglik=-186.932
+chain=2 mcmc_iter=01200 loglik=-187.432
+chain=2 mcmc_iter=01800 loglik=-189.885
+chain=2 mcmc_iter=02400 loglik=-187.478
+chain=2 mcmc_iter=03000 loglik=-201.362
+chain=2 mcmc_iter=03600 loglik=-190.585
+chain=2 mcmc_iter=04200 loglik=-188.970
+chain=2 mcmc_iter=04800 loglik=-191.872
+chain=2 mcmc_iter=05400 loglik=-186.061
+chain=2 mcmc_iter=06000 loglik=-191.557
+--- MCMC chain 3/4; seed=13451 ---
+chain=3 mcmc_iter=00001 loglik=-604.440
+chain=3 mcmc_iter=00600 loglik=-191.923
+chain=3 mcmc_iter=01200 loglik=-188.380
+chain=3 mcmc_iter=01800 loglik=-188.955
+chain=3 mcmc_iter=02400 loglik=-190.973
+chain=3 mcmc_iter=03000 loglik=-187.957
+chain=3 mcmc_iter=03600 loglik=-186.808
+chain=3 mcmc_iter=04200 loglik=-192.213
+chain=3 mcmc_iter=04800 loglik=-192.237
+chain=3 mcmc_iter=05400 loglik=-193.941
+chain=3 mcmc_iter=06000 loglik=-188.477
+--- MCMC chain 4/4; seed=14460 ---
+chain=4 mcmc_iter=00001 loglik=-249.036
+chain=4 mcmc_iter=00600 loglik=-188.785
+chain=4 mcmc_iter=01200 loglik=-194.225
+chain=4 mcmc_iter=01800 loglik=-190.057
+chain=4 mcmc_iter=02400 loglik=-193.953
+chain=4 mcmc_iter=03000 loglik=-188.152
+chain=4 mcmc_iter=03600 loglik=-189.148
+chain=4 mcmc_iter=04200 loglik=-190.813
+chain=4 mcmc_iter=04800 loglik=-189.458
+chain=4 mcmc_iter=05400 loglik=-192.459
+chain=4 mcmc_iter=06000 loglik=-193.193
+epoch=0001 phase=repr   valR2=-1.2512
+epoch=0250 phase=repr   valR2=0.9415
+epoch=0500 phase=repr   valR2=0.9410
+epoch=0750 phase=select valR2=0.9800 pipMCMC=0.0555 activeSKL=0.0751
+epoch=1000 phase=select valR2=0.9569 pipMCMC=0.3121 activeSKL=1.5411
+epoch=1250 phase=select valR2=0.9610 pipMCMC=0.2753 activeSKL=1.0249
+epoch=1500 phase=select valR2=0.9739 pipMCMC=0.2950 activeSKL=1.2113
+epoch=1750 phase=select valR2=0.9442 pipMCMC=0.2797 activeSKL=1.7617
+epoch=2000 phase=select valR2=0.9391 pipMCMC=0.3385 activeSKL=1.5139
+joint-active draws: VI=5000, MCMC=20000
+joint-active probability: VI=1.0000, MCMC=1.0000
+joint-density draws used: VI=2000, MCMC=2000
+conditional joint SKL: 2.2951
+                                         config_id  stage architecture hidden_dims embedding_dim selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__stacked__edge_group__normalized_requ__h5x5      1      stacked         5x5          None     edge_group normalized_requ             1.0            edge        spline improved_separate_attention           4                2            8 240  6             0;3 11433       0.172884         0.045133    1.698176 0.036086   2.295114     independent_edge_density                       0.415793                         0.656722                 60       382.04646    2564.232959                    False                              False
+
+=== [4/6] stage1__embed_output__feature_group__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=12233 ---
+chain=1 mcmc_iter=00001 loglik=-389.095
+chain=1 mcmc_iter=00600 loglik=-189.437
+chain=1 mcmc_iter=01200 loglik=-187.335
+chain=1 mcmc_iter=01800 loglik=-188.784
+chain=1 mcmc_iter=02400 loglik=-191.630
+chain=1 mcmc_iter=03000 loglik=-191.411
+chain=1 mcmc_iter=03600 loglik=-191.269
+chain=1 mcmc_iter=04200 loglik=-187.021
+chain=1 mcmc_iter=04800 loglik=-192.883
+chain=1 mcmc_iter=05400 loglik=-189.904
+chain=1 mcmc_iter=06000 loglik=-186.426
+--- MCMC chain 2/4; seed=13242 ---
+chain=2 mcmc_iter=00001 loglik=-311.464
+chain=2 mcmc_iter=00600 loglik=-188.774
+chain=2 mcmc_iter=01200 loglik=-190.161
+chain=2 mcmc_iter=01800 loglik=-192.958
+chain=2 mcmc_iter=02400 loglik=-188.118
+chain=2 mcmc_iter=03000 loglik=-187.221
+chain=2 mcmc_iter=03600 loglik=-191.546
+chain=2 mcmc_iter=04200 loglik=-191.261
+chain=2 mcmc_iter=04800 loglik=-188.344
+chain=2 mcmc_iter=05400 loglik=-187.496
+chain=2 mcmc_iter=06000 loglik=-190.248
+--- MCMC chain 3/4; seed=14251 ---
+chain=3 mcmc_iter=00001 loglik=-294.237
+chain=3 mcmc_iter=00600 loglik=-194.500
+chain=3 mcmc_iter=01200 loglik=-190.955
+chain=3 mcmc_iter=01800 loglik=-190.646
+chain=3 mcmc_iter=02400 loglik=-194.774
+chain=3 mcmc_iter=03000 loglik=-186.652
+chain=3 mcmc_iter=03600 loglik=-187.145
+chain=3 mcmc_iter=04200 loglik=-188.692
+chain=3 mcmc_iter=04800 loglik=-190.228
+chain=3 mcmc_iter=05400 loglik=-194.267
+chain=3 mcmc_iter=06000 loglik=-189.406
+--- MCMC chain 4/4; seed=15260 ---
+chain=4 mcmc_iter=00001 loglik=-328.109
+chain=4 mcmc_iter=00600 loglik=-194.428
+chain=4 mcmc_iter=01200 loglik=-189.292
+chain=4 mcmc_iter=01800 loglik=-192.766
+chain=4 mcmc_iter=02400 loglik=-188.408
+chain=4 mcmc_iter=03000 loglik=-189.213
+chain=4 mcmc_iter=03600 loglik=-189.895
+chain=4 mcmc_iter=04200 loglik=-189.726
+chain=4 mcmc_iter=04800 loglik=-190.475
+chain=4 mcmc_iter=05400 loglik=-192.278
+chain=4 mcmc_iter=06000 loglik=-187.764
+epoch=0001 phase=repr   valR2=-1.0006
+epoch=0250 phase=repr   valR2=-0.0205
+epoch=0500 phase=repr   valR2=-0.0186
+epoch=0750 phase=select valR2=-0.0232 pipTruth=0.4998 activeSKL=0.0846
+epoch=1000 phase=select valR2=-0.0189 pipTruth=0.4744 activeSKL=0.0741
+epoch=1250 phase=select valR2=-0.0141 pipTruth=0.4818 activeSKL=0.0773
+epoch=1500 phase=select valR2=-0.0211 pipTruth=0.4955 activeSKL=0.0655
+epoch=1750 phase=select valR2=-0.0163 pipTruth=0.5037 activeSKL=0.0870
+epoch=2000 phase=select valR2=-0.0226 pipTruth=0.4787 activeSKL=0.0695
+joint-active draws: VI=464, MCMC=20000
+joint-active probability: VI=0.0928, MCMC=1.0000
+joint-density draws used: VI=464, MCMC=464
+conditional joint SKL: 0.0592
+                                                 config_id  stage architecture hidden_dims  embedding_dim selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__embed_output__feature_group__normalized_requ__h5x5      1 embed_output         5x5              6  feature_group normalized_requ             1.0         feature        spline improved_separate_attention           4                2            8 240  6             0;3 12233       2.961785         0.037573    0.006004 0.005769   0.059175              feature_density                       0.233633                         0.436792                 96      932.147016     8804.10506                    False                              False
+
+=== [5/6] stage1__embed_output__feature_unit_induced_edge__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=12333 ---
+chain=1 mcmc_iter=00001 loglik=-241.294
+chain=1 mcmc_iter=00600 loglik=-191.810
+chain=1 mcmc_iter=01200 loglik=-190.095
+chain=1 mcmc_iter=01800 loglik=-190.700
+chain=1 mcmc_iter=02400 loglik=-186.234
+chain=1 mcmc_iter=03000 loglik=-192.399
+chain=1 mcmc_iter=03600 loglik=-189.973
+chain=1 mcmc_iter=04200 loglik=-188.089
+chain=1 mcmc_iter=04800 loglik=-188.456
+chain=1 mcmc_iter=05400 loglik=-191.317
+chain=1 mcmc_iter=06000 loglik=-188.277
+--- MCMC chain 2/4; seed=13342 ---
+chain=2 mcmc_iter=00001 loglik=-322.301
+chain=2 mcmc_iter=00600 loglik=-192.080
+chain=2 mcmc_iter=01200 loglik=-190.757
+chain=2 mcmc_iter=01800 loglik=-188.579
+chain=2 mcmc_iter=02400 loglik=-190.443
+chain=2 mcmc_iter=03000 loglik=-190.384
+chain=2 mcmc_iter=03600 loglik=-186.775
+chain=2 mcmc_iter=04200 loglik=-188.745
+chain=2 mcmc_iter=04800 loglik=-192.533
+chain=2 mcmc_iter=05400 loglik=-194.710
+chain=2 mcmc_iter=06000 loglik=-189.612
+--- MCMC chain 3/4; seed=14351 ---
+chain=3 mcmc_iter=00001 loglik=-327.747
+chain=3 mcmc_iter=00600 loglik=-188.565
+chain=3 mcmc_iter=01200 loglik=-188.679
+chain=3 mcmc_iter=01800 loglik=-187.758
+chain=3 mcmc_iter=02400 loglik=-190.463
+chain=3 mcmc_iter=03000 loglik=-186.403
+chain=3 mcmc_iter=03600 loglik=-188.672
+chain=3 mcmc_iter=04200 loglik=-189.298
+chain=3 mcmc_iter=04800 loglik=-191.261
+chain=3 mcmc_iter=05400 loglik=-190.328
+chain=3 mcmc_iter=06000 loglik=-190.589
+--- MCMC chain 4/4; seed=15360 ---
+chain=4 mcmc_iter=00001 loglik=-327.821
+chain=4 mcmc_iter=00600 loglik=-190.164
+chain=4 mcmc_iter=01200 loglik=-184.977
+chain=4 mcmc_iter=01800 loglik=-191.620
+chain=4 mcmc_iter=02400 loglik=-193.326
+chain=4 mcmc_iter=03000 loglik=-191.121
+chain=4 mcmc_iter=03600 loglik=-192.141
+chain=4 mcmc_iter=04200 loglik=-190.472
+chain=4 mcmc_iter=04800 loglik=-190.687
+chain=4 mcmc_iter=05400 loglik=-187.203
+chain=4 mcmc_iter=06000 loglik=-190.507
+epoch=0001 phase=repr   valR2=-0.7892
+epoch=0250 phase=repr   valR2=0.6088
+epoch=0500 phase=repr   valR2=0.6026
+epoch=0750 phase=select valR2=0.7230 pipMCMC=0.0408 activeSKL=0.0807
+epoch=1000 phase=select valR2=0.7279 pipMCMC=0.0292 activeSKL=0.1061
+epoch=1250 phase=select valR2=0.7166 pipMCMC=0.0166 activeSKL=0.3910
+epoch=1500 phase=select valR2=0.7252 pipMCMC=0.0174 activeSKL=0.3168
+epoch=1750 phase=select valR2=0.7223 pipMCMC=0.0261 activeSKL=0.3226
+epoch=2000 phase=select valR2=0.7176 pipMCMC=0.0231 activeSKL=0.3001
+joint-active draws: VI=5000, MCMC=20000
+joint-active probability: VI=1.0000, MCMC=1.0000
+joint-density draws used: VI=2000, MCMC=2000
+conditional joint SKL: 2.9163
+                                                             config_id  stage architecture hidden_dims  embedding_dim            selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__embed_output__feature_unit_induced_edge__normalized_requ__h5x5      1 embed_output         5x5              6 feature_unit_induced_edge normalized_requ             1.0    feature;unit        spline improved_separate_attention           4                2            8 240  6             0;3 12333       0.777137         0.042857    0.326721 0.003565   2.916295         induced_edge_density                        0.28854                         0.679987                 96      956.294293   12218.542211                    False                              False
+
+=== [6/6] stage1__embed_output__edge_group__normalized_requ__h5x5 ===
+--- MCMC chain 1/4; seed=12433 ---
+chain=1 mcmc_iter=00001 loglik=-243.472
+chain=1 mcmc_iter=00600 loglik=-191.135
+chain=1 mcmc_iter=01200 loglik=-191.810
+chain=1 mcmc_iter=01800 loglik=-190.872
+chain=1 mcmc_iter=02400 loglik=-192.939
+chain=1 mcmc_iter=03000 loglik=-191.174
+chain=1 mcmc_iter=03600 loglik=-188.083
+chain=1 mcmc_iter=04200 loglik=-189.881
+chain=1 mcmc_iter=04800 loglik=-191.670
+chain=1 mcmc_iter=05400 loglik=-188.722
+chain=1 mcmc_iter=06000 loglik=-191.456
+--- MCMC chain 2/4; seed=13442 ---
+chain=2 mcmc_iter=00001 loglik=-337.365
+chain=2 mcmc_iter=00600 loglik=-183.638
+chain=2 mcmc_iter=01200 loglik=-189.610
+chain=2 mcmc_iter=01800 loglik=-194.080
+chain=2 mcmc_iter=02400 loglik=-185.833
+chain=2 mcmc_iter=03000 loglik=-193.169
+chain=2 mcmc_iter=03600 loglik=-198.060
+chain=2 mcmc_iter=04200 loglik=-186.648
+chain=2 mcmc_iter=04800 loglik=-191.015
+chain=2 mcmc_iter=05400 loglik=-196.082
+chain=2 mcmc_iter=06000 loglik=-188.729
+--- MCMC chain 3/4; seed=14451 ---
+chain=3 mcmc_iter=00001 loglik=-370.714
+chain=3 mcmc_iter=00600 loglik=-186.643
+chain=3 mcmc_iter=01200 loglik=-189.320
+chain=3 mcmc_iter=01800 loglik=-192.568
+chain=3 mcmc_iter=02400 loglik=-189.681
+chain=3 mcmc_iter=03000 loglik=-194.998
+chain=3 mcmc_iter=03600 loglik=-193.620
+chain=3 mcmc_iter=04200 loglik=-190.055
+chain=3 mcmc_iter=04800 loglik=-188.082
+chain=3 mcmc_iter=05400 loglik=-191.928
+chain=3 mcmc_iter=06000 loglik=-190.496
+--- MCMC chain 4/4; seed=15460 ---
+chain=4 mcmc_iter=00001 loglik=-264.438
+chain=4 mcmc_iter=00600 loglik=-191.803
+chain=4 mcmc_iter=01200 loglik=-188.380
+chain=4 mcmc_iter=01800 loglik=-190.652
+chain=4 mcmc_iter=02400 loglik=-190.480
+chain=4 mcmc_iter=03000 loglik=-189.006
+chain=4 mcmc_iter=03600 loglik=-195.795
+chain=4 mcmc_iter=04200 loglik=-190.682
+chain=4 mcmc_iter=04800 loglik=-195.114
+chain=4 mcmc_iter=05400 loglik=-193.261
+chain=4 mcmc_iter=06000 loglik=-189.853
+epoch=0001 phase=repr   valR2=-1.1064
+epoch=0250 phase=repr   valR2=-0.0191
+epoch=0500 phase=repr   valR2=-0.0153
+epoch=0750 phase=select valR2=-0.0162 pipMCMC=0.6017 activeSKL=5.3308
+epoch=1000 phase=select valR2=-0.0138 pipMCMC=0.6286 activeSKL=7.7232
+epoch=1250 phase=select valR2=-0.0208 pipMCMC=0.6366 activeSKL=9.6816
+epoch=1500 phase=select valR2=-0.0133 pipMCMC=0.6337 activeSKL=9.7038
+epoch=1750 phase=select valR2=-0.0195 pipMCMC=0.5986 activeSKL=8.0703
+epoch=2000 phase=select valR2=-0.0145 pipMCMC=0.6224 activeSKL=7.7695
+joint-active draws: VI=3876, MCMC=20000
+joint-active probability: VI=0.7752, MCMC=1.0000
+joint-density draws used: VI=2000, MCMC=2000
+conditional joint SKL: 11.4832
+                                              config_id  stage architecture hidden_dims  embedding_dim selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+stage1__embed_output__edge_group__normalized_requ__h5x5      1 embed_output         5x5              6     edge_group normalized_requ             1.0            edge        spline improved_separate_attention           4                2            8 240  6             0;3 12433       2.941056         0.055748    5.560337  0.03331  11.483248     independent_edge_density                       0.143067                         0.656346                 96     1312.093874     14218.6297                    False                              False
+
+=== current scientific summary ===
+                                                             config_id  stage architecture hidden_dims  embedding_dim            selection_mode       gate_type  gate_parameter threshold_roles coupling_type            conditioner_type  flow_depth  attention_heads  spline_bins   n  p active_features  seed  vi_signal_mse  mcmc_signal_mse  active_skl  zero_js  joint_skl structure_density_definition  vi_expected_structure_density  mcmc_expected_structure_density  n_candidate_edges  train_time_sec  mcmc_time_sec  mcmc_reference_reliable  scientific_interpretation_allowed
+               stage1__embed_output__edge_group__normalized_requ__h5x5      1 embed_output         5x5            6.0                edge_group normalized_requ             1.0            edge        spline improved_separate_attention           4                2            8 240  6             0;3 12433       2.941056         0.055748    5.560337 0.033310  11.483248     independent_edge_density                       0.143067                         0.656346                 96     1312.093874   14218.629700                    False                              False
+            stage1__embed_output__feature_group__normalized_requ__h5x5      1 embed_output         5x5            6.0             feature_group normalized_requ             1.0         feature        spline improved_separate_attention           4                2            8 240  6             0;3 12233       2.961785         0.037573    0.006004 0.005769   0.059175              feature_density                       0.233633                         0.436792                 96      932.147016    8804.105060                    False                              False
+stage1__embed_output__feature_unit_induced_edge__normalized_requ__h5x5      1 embed_output         5x5            6.0 feature_unit_induced_edge normalized_requ             1.0    feature;unit        spline improved_separate_attention           4                2            8 240  6             0;3 12333       0.777137         0.042857    0.326721 0.003565   2.916295         induced_edge_density                       0.288540                         0.679987                 96      956.294293   12218.542211                    False                              False
+                    stage1__stacked__edge_group__normalized_requ__h5x5      1      stacked         5x5            NaN                edge_group normalized_requ             1.0            edge        spline improved_separate_attention           4                2            8 240  6             0;3 11433       0.172884         0.045133    1.698176 0.036086   2.295114     independent_edge_density                       0.415793                         0.656722                 60      382.046460    2564.232959                    False                              False
+                 stage1__stacked__feature_group__normalized_requ__h5x5      1      stacked         5x5            NaN             feature_group normalized_requ             1.0         feature        spline improved_separate_attention           4                2            8 240  6             0;3 11233       0.074378         0.039379    0.947053 0.001624   2.408178              feature_density                       0.454233                         0.475683                 60      261.858157    1044.114214                    False                              False
+     stage1__stacked__feature_unit_induced_edge__normalized_requ__h5x5      1      stacked         5x5            NaN feature_unit_induced_edge normalized_requ             1.0    feature;unit        spline improved_separate_attention           4                2            8 240  6             0;3 11333       0.042536         0.045257    6.175231 0.019880   1.933828         induced_edge_density                       0.238843                         0.647548                 60      306.576119    1659.874605                    False                              False

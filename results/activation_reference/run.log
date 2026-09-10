@@ -1,0 +1,119 @@
+device=cpu output=D:\positron\NFlow\results\activation_reference
+
+=== shared hard-gate MCMC ===
+mcmc_iter=00001 loglik=-303.461
+mcmc_iter=00600 loglik=-139.793
+mcmc_iter=01200 loglik=-139.775
+mcmc_iter=01800 loglik=-140.493
+mcmc_iter=02400 loglik=-140.052
+mcmc_iter=03000 loglik=-143.955
+mcmc_iter=03600 loglik=-139.729
+mcmc_iter=04200 loglik=-145.556
+mcmc_iter=04800 loglik=-140.818
+mcmc_iter=05400 loglik=-141.506
+mcmc_iter=06000 loglik=-140.872
+
+=== matched relu MCMC ===
+mcmc_iter=00001 loglik=-736.985
+mcmc_iter=00600 loglik=-139.424
+mcmc_iter=01200 loglik=-139.053
+mcmc_iter=01800 loglik=-141.937
+mcmc_iter=02400 loglik=-140.347
+mcmc_iter=03000 loglik=-140.498
+mcmc_iter=03600 loglik=-142.813
+mcmc_iter=04200 loglik=-139.308
+mcmc_iter=04800 loglik=-142.420
+mcmc_iter=05400 loglik=-141.772
+mcmc_iter=06000 loglik=-139.994
+
+=== matched normalized_requ MCMC ===
+mcmc_iter=00001 loglik=-732.706
+mcmc_iter=00600 loglik=-140.900
+mcmc_iter=01200 loglik=-140.342
+mcmc_iter=01800 loglik=-139.573
+mcmc_iter=02400 loglik=-141.994
+mcmc_iter=03000 loglik=-140.420
+mcmc_iter=03600 loglik=-140.593
+mcmc_iter=04200 loglik=-139.982
+mcmc_iter=04800 loglik=-142.637
+mcmc_iter=05400 loglik=-140.631
+mcmc_iter=06000 loglik=-139.333
+
+=== matched smooth_step MCMC ===
+mcmc_iter=00001 loglik=-587.588
+mcmc_iter=00600 loglik=-140.949
+mcmc_iter=01200 loglik=-140.570
+mcmc_iter=01800 loglik=-143.266
+mcmc_iter=02400 loglik=-141.036
+mcmc_iter=03000 loglik=-143.812
+mcmc_iter=03600 loglik=-142.762
+mcmc_iter=04200 loglik=-141.374
+mcmc_iter=04800 loglik=-142.221
+mcmc_iter=05400 loglik=-139.565
+mcmc_iter=06000 loglik=-142.052
+
+=== VI activation: relu ===
+epoch=0001 phase=repr   valR2=-5.7289
+epoch=0250 phase=repr   valR2=0.9782
+epoch=0500 phase=repr   valR2=0.9838
+epoch=0750 phase=repr   valR2=0.9862
+epoch=1000 phase=repr   valR2=0.9836
+epoch=1250 phase=select valR2=0.9700 pipTruth=0.3383 activeSKL=1.6643
+epoch=1500 phase=select valR2=0.9774 pipTruth=0.1886 activeSKL=1.0652
+epoch=1750 phase=select valR2=0.9817 pipTruth=0.2057 activeSKL=1.1015
+epoch=2000 phase=select valR2=0.9675 pipTruth=0.2253 activeSKL=0.5771
+epoch=2250 phase=select valR2=0.9531 pipTruth=0.2319 activeSKL=0.5797
+epoch=2500 phase=select valR2=0.9626 pipTruth=0.2766 activeSKL=0.3838
+
+=== VI activation: normalized_requ ===
+epoch=0001 phase=repr   valR2=-5.7289
+epoch=0250 phase=repr   valR2=0.9782
+epoch=0500 phase=repr   valR2=0.9838
+epoch=0750 phase=repr   valR2=0.9862
+epoch=1000 phase=repr   valR2=0.9836
+epoch=1250 phase=select valR2=0.9701 pipTruth=0.7049 activeSKL=0.7753
+epoch=1500 phase=select valR2=0.9577 pipTruth=0.6717 activeSKL=0.6526
+epoch=1750 phase=select valR2=0.9836 pipTruth=0.6082 activeSKL=0.3590
+epoch=2000 phase=select valR2=0.9852 pipTruth=0.5995 activeSKL=0.3083
+epoch=2250 phase=select valR2=0.9851 pipTruth=0.5799 activeSKL=0.2749
+epoch=2500 phase=select valR2=0.9862 pipTruth=0.5444 activeSKL=0.2000
+
+=== VI activation: smooth_step ===
+epoch=0001 phase=repr   valR2=-5.7289
+epoch=0250 phase=repr   valR2=0.9782
+epoch=0500 phase=repr   valR2=0.9838
+epoch=0750 phase=repr   valR2=0.9862
+epoch=1000 phase=repr   valR2=0.9836
+epoch=1250 phase=select valR2=0.9865 pipTruth=0.6649 activeSKL=0.3248
+epoch=1500 phase=select valR2=0.9819 pipTruth=0.6803 activeSKL=0.3652
+epoch=1750 phase=select valR2=0.9755 pipTruth=0.6077 activeSKL=0.3213
+epoch=2000 phase=select valR2=0.9668 pipTruth=0.6081 activeSKL=0.3880
+epoch=2250 phase=select valR2=0.9886 pipTruth=0.5827 activeSKL=0.4927
+epoch=2500 phase=select valR2=0.9864 pipTruth=0.5203 activeSKL=0.2424
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 1.1003
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 3.1613
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 0.4731
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 1.8842
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 0.7772
+joint-active draws: RaT=5000, MCMC=5000
+joint-active probability: RaT=1.0000, MCMC=1.0000
+conditional joint SKL: 1.5053
+
+=== completed ===
+     activation reference  pip_rmse_truth  pip_rmse_mcmc  true_active_skl  true_active_skl_mean  zero_js  zero_js_mean  n_truth_active  n_truth_zero  n_valid_true_active_skl selection_mode reference_compatibility  rmse_with_mcmc  true_skl  conditional_joint_skl  rat_joint_active_draws  mcmc_joint_active_draws  rat_joint_active_prob  mcmc_joint_active_prob  rat_test_signal_r2  rat_test_signal_mse  mcmc_reference_signal_r2  mcmc_reference_mse        elbo  train_time_sec  posterior_sampling_time_sec  posterior_sampling_time_iqr_sec  trainable_params  flow_trainable_params  mcmc_sampling_time_sec  mcmc_reference_draw_r2_median  mcmc_reference_draw_r2_positive_prob  mcmc_reference_zero_function_prob  mcmc_reference_constant_function_prob  mcmc_reference_corr2  mcmc_reference_function_energy_mean  mcmc_reference_function_energy_median
+           relu   matched        0.283494       0.382570         0.442433              0.442433 0.167900      0.159180               2             3                        2     unit_group                   exact        0.382570  0.442433               1.100336                    5000                     5000                    1.0                     1.0            0.960451             0.098882                  0.978660            0.053355 -160.880493      270.339086                     0.360036                         0.005335            165452                 165408               86.223110                            NaN                                   NaN                                NaN                                    NaN                   NaN                                  NaN                                    NaN
+           relu      hard        0.283494       0.365707         0.789549              0.789549 0.162312      0.145575               2             3                        2     unit_group              structural        0.365707  0.789549               3.161302                    5000                     5000                    1.0                     1.0            0.960451             0.098882                  0.979195            0.052017 -160.880493      270.339086                     0.360036                         0.005335            165452                 165408               69.202686                        0.96428                                   1.0                                0.0                                    0.0              0.987604                            15.826564                              15.799488
+normalized_requ   matched        0.545521       0.202844         0.194260              0.194260 0.048295      0.047142               2             3                        2     unit_group                   exact        0.202844  0.194260               0.473062                    5000                     5000                    1.0                     1.0            0.979842             0.050400                  0.979104            0.052246 -160.581696      269.174254                     0.360060                         0.001691            165452                 165408               76.358991                            NaN                                   NaN                                NaN                                    NaN                   NaN                                  NaN                                    NaN
+normalized_requ      hard        0.545521       0.067869         0.566512              0.566512 0.002938      0.004272               2             3                        2     unit_group              structural        0.067869  0.566512               1.884166                    5000                     5000                    1.0                     1.0            0.979842             0.050400                  0.979195            0.052017 -160.581696      269.174254                     0.360060                         0.001691            165452                 165408               69.202686                        0.96428                                   1.0                                0.0                                    0.0              0.987604                            15.826564                              15.799488
+    smooth_step   matched        0.518071       0.132624         0.319300              0.319300 0.021418      0.019445               2             3                        2     unit_group                   exact        0.132624  0.319300               0.777186                    5000                     5000                    1.0                     1.0            0.967240             0.081908                  0.980413            0.048971 -161.208969      264.267080                     0.367854                         0.004075            165452                 165408              103.984203                            NaN                                   NaN                                NaN                                    NaN                   NaN                                  NaN                                    NaN
+    smooth_step      hard        0.518071       0.097826         0.669703              0.669703 0.009265      0.009437               2             3                        2     unit_group              structural        0.097826  0.669703               1.505340                    5000                     5000                    1.0                     1.0            0.967240             0.081908                  0.979195            0.052017 -161.208969      264.267080                     0.367854                         0.004075            165452                 165408               69.202686                        0.96428                                   1.0                                0.0                                    0.0              0.987604                            15.826564                              15.799488

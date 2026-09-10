@@ -1,0 +1,70 @@
+{
+  "sim": "canonical_shallow_group_bnn",
+  "seed": 123,
+  "family": "gaussian",
+  "n": 160,
+  "p": 1,
+  "sigma2": 1.0,
+  "sigma": 1.0,
+  "signal_var": 2.25,
+  "snr": 2.25,
+  "x_range": [
+    -2.5,
+    2.5
+  ],
+  "active_idx": [
+    0
+  ],
+  "feature_true": [
+    1.0
+  ],
+  "n_true_units": 2,
+  "fit_units": 5,
+  "unit_rank_true": [
+    1.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "teacher_units": [
+    {
+      "teacher_unit": 0,
+      "feature": 0,
+      "slope": 0.8991619427476751,
+      "breakpoint": -0.47082370188029704,
+      "bias": -0.4233467544743401,
+      "amplitude": 1.93000385463081
+    },
+    {
+      "teacher_unit": 1,
+      "feature": 0,
+      "slope": -0.8791576554882636,
+      "breakpoint": 0.4286113630083556,
+      "bias": -0.376816961018055,
+      "amplitude": 2.8267268148821114
+    }
+  ],
+  "teacher": {
+    "weight": [
+      [
+        0.8991619427476751
+      ],
+      [
+        -0.8791576554882636
+      ]
+    ],
+    "bias": [
+      -0.4233467544743401,
+      -0.376816961018055
+    ],
+    "amplitude": [
+      1.93000385463081,
+      2.8267268148821114
+    ],
+    "intercept": 0.0,
+    "repu_power": null
+  },
+  "repu_power": null,
+  "unit_truth_identification": "canonical teacher representation only; posterior unit labels are permutation/scale non-identifiable, so evaluate ranked unit slots"
+}

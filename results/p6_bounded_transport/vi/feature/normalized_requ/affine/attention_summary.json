@@ -1,0 +1,18 @@
+{
+  "n_draws": 1000,
+  "n_coupling_layers": 8,
+  "files": {
+    "shift_head1": "attention_shift_head1.csv",
+    "shift_head2": "attention_shift_head2.csv",
+    "scale_head1": "attention_scale_head1.csv",
+    "scale_head2": "attention_scale_head2.csv"
+  },
+  "mean_entropy": {
+    "shift_head1": 1.4830665810004575,
+    "shift_head2": 1.522585930263934,
+    "scale_head1": 0.9185031099647555,
+    "scale_head2": 1.0787850153877419
+  },
+  "shift_head_mean_abs_difference": 0.0670088529586792,
+  "scale_head_mean_abs_difference": 0.06716395914554596
+}

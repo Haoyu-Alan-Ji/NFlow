@@ -17,4 +17,4 @@ __pycache__/
 *.pyc
 
 # IDE files
-.vscode/
+.vscode/results/mlp_group_selection.zip

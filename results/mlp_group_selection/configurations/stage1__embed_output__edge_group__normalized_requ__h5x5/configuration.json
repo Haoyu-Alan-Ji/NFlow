@@ -1,0 +1,26 @@
+{
+  "config_id": "stage1__embed_output__edge_group__normalized_requ__h5x5",
+  "stage": 1,
+  "architecture": "embed_output",
+  "selection_mode": "edge_group",
+  "gate_type": "normalized_requ",
+  "hidden_dims": [
+    5,
+    5
+  ],
+  "embedding_dim": 6,
+  "seed": 12433,
+  "n": 240,
+  "p": 6,
+  "active_features": [
+    0,
+    3
+  ],
+  "sigma2": 1.0,
+  "coupling_type": "spline",
+  "conditioner_type": "improved_separate_attention",
+  "flow_depth": 4,
+  "attention_heads": 2,
+  "spline_bins": 8,
+  "gate_parameter": 1.0
+}

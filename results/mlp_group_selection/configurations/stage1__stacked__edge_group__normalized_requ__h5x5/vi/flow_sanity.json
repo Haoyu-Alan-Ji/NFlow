@@ -1,0 +1,12 @@
+{
+  "max_inverse_error": 1.9162893295288086e-05,
+  "max_logdet_consistency_error": 1.52587890625e-05,
+  "n_nonfinite_forward": 0,
+  "n_nonfinite_inverse": 0,
+  "n_nonfinite_logdet": 0,
+  "n_nonfinite_spline_parameters": 0,
+  "min_width": 0.2761744260787964,
+  "min_height": 0.2865815758705139,
+  "min_derivative": 0.1447862833738327,
+  "n_nonfinite_gradients": 0
+}

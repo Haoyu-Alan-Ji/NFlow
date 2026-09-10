@@ -1,0 +1,1151 @@
+\documentclass{article}
+
+% ============================================================
+% ICLR 2027 style
+% ============================================================
+\usepackage{iclr2027_conference,times}
+
+% Optional notation commands distributed with the ICLR template.
+% Keep this line as long as math_commands.tex is in the same folder.
+\input{math_commands.tex}
+
+% ============================================================
+% Packages used by the manuscript
+% ============================================================
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{url}
+
+% ============================================================
+% Title and anonymous submission
+% ============================================================
+\title{Flow-Based Variational Inference for Group-Structured
+Spike-and-Slab Neural Networks}
+
+\author{Anonymous Authors}
+
+% Keep commented for anonymous submission.
+% \iclrfinalcopy
+
+\begin{document}
+
+\maketitle
+
+
+% ============================================================
+% Abstract
+% ============================================================
+
+\begin{abstract}
+
+% TODO:
+% 1. Group-structured spike-and-slab posterior inference.
+% 2. Continuous latent activation with shared threshold.
+% 3. Exact-zero bounded activations motivated by repeated structural gating.
+% 4. Structure-aware spline posterior transport.
+% 5. Applications to variable selection, hidden-unit sparsification,
+%    and induced/independent neural connectivity.
+% 6. Shallow posterior fidelity + multilayer MLP + real-world application.
+
+\end{abstract}
+
+
+% ============================================================
+% 1. Introduction
+% ============================================================
+
+\section{Introduction}
+\label{sec:introduction}
+
+% TODO:
+%
+% Motivation:
+% - DSS priors provide exact structural zeros and posterior inclusion
+%   uncertainty, but inference is difficult in nonlinear models.
+% - Neural-network sparsity is intrinsically structured:
+%   predictors, hidden units, and edges are different selection objects.
+% - Existing element-wise formulations do not provide a unified
+%   representation of these structures.
+%
+% Main idea:
+%
+% one structural group
+% <-> one continuous activation latent
+% <-> one posterior inclusion event
+%
+% Contributions:
+%
+% 1. Group-structured latent spike-and-slab representation.
+% 2. Two bounded exact-zero activations derived from repeated gating.
+% 3. Structure-aware spline flows with full and lightweight attention.
+% 4. Unified feature, hidden-unit, induced-edge, and singleton-edge sparsity.
+% 5. Posterior-fidelity validation against MCMC in shallow neural networks,
+%    followed by structured sparsification in multilayer MLPs.
+
+
+% ============================================================
+% 2. Method
+% ============================================================
+
+\section{Method}
+\label{sec:method}
+
+
+% ------------------------------------------------------------
+% 2.1 Group LVR-DSS
+% ------------------------------------------------------------
+
+\subsection{Group-Structured Spike-and-Slab through Latent Activation}
+\label{sec:group_lvr}
+
+% TODO:
+%
+% Begin briefly from the scalar DSS prior:
+%
+% pi(beta_j)
+% =
+% (1 - omega) delta_0(beta_j)
+% +
+% omega pi_S(beta_j).
+%
+% Introduce the latent representation:
+%
+% beta_j
+% =
+% A_tau(V_j) S_lambda(U_j).
+%
+% Then immediately move to the main group formulation:
+%
+% beta_{G_g}
+% =
+% A_tau(V_g)
+% S_{lambda_g}(U_{G_g}).
+%
+% One structural group shares one scalar activation latent V_g.
+%
+% Define:
+%
+% I_g = I(V_g > tau)
+%
+% and:
+%
+% PIP_g = P(V_g > tau | D).
+%
+% Emphasize:
+% - group structure is the primary formulation;
+% - ordinary scalar/element-wise DSS is the singleton-group special case;
+% - the shared threshold controls global sparsity;
+% - continuous slab variables retain within-group effect uncertainty.
+
+
+% ------------------------------------------------------------
+% 2.2 Neural structures
+% ------------------------------------------------------------
+
+\subsection{Structured Sparsity in Neural Networks}
+\label{sec:nn_structure}
+
+% TODO:
+%
+% Define the stacked multilayer network:
+%
+% h^(1) = phi(W_1 x + b_1)
+%
+% h^(ell) = phi(W_ell h^(ell-1) + b_ell)
+%
+% f_theta(x) = W_{L+1} h^(L) + b_{L+1}.
+%
+% Use ReLU as the ordinary hidden activation.
+% ReLU here concerns function representation, not structural gating.
+
+
+\subsubsection{Feature Groups}
+\label{sec:feature_groups}
+
+% TODO:
+%
+% Define:
+%
+% \tilde{x}_k = g_k^F x_k
+%
+% so that
+%
+% I_k^F = 0
+%
+% removes predictor x_k from the entire network.
+%
+% Explain this as nonlinear Bayesian variable selection.
+%
+% For the first layer, the equivalent parameter group corresponds to
+% the complete column W_1[:, k].
+
+
+\subsubsection{Hidden-Unit Groups}
+\label{sec:unit_groups}
+
+% TODO:
+%
+% Define unit activation:
+%
+% h_{\ell j}
+% =
+% g_{\ell j}^U
+% phi(
+% W_{\ell,j:} h^{(\ell-1)}
+% +
+% b_{\ell j}
+% ).
+%
+% Explicitly include b_{\ell j}.
+%
+% In particular, b_2 is part of the second-layer unit preactivation.
+%
+% Main interpretation:
+%
+% unit selection = activation selection.
+%
+% Do not define units through mutually exclusive parameter ownership,
+% because adjacent layers share connecting weights.
+
+
+\subsubsection{Feature--Unit Induced Connectivity}
+\label{sec:induced_edges}
+
+% TODO:
+%
+% First layer:
+%
+% I_{1,jk}^{E,ind}
+% =
+% I_k^F I_{1j}^U.
+%
+% Hidden-to-hidden:
+%
+% I_{\ell,ji}^{E,ind}
+% =
+% I_{\ell-1,i}^U I_{\ell,j}^U.
+%
+% Output:
+%
+% I_{out,i}^{E,ind}
+% =
+% I_{L,i}^U.
+%
+% Important:
+% induced edge activity is a posterior-derived connectivity quantity,
+% not an additional gate multiplied again into the forward model.
+%
+% This gives:
+%
+% feature sparsity
+% +
+% unit sparsity
+% =>
+% induced edge/path sparsity.
+
+
+\subsubsection{Independent Edge Groups}
+\label{sec:edge_groups}
+
+% TODO:
+%
+% Treat each neural-network weight as a singleton group:
+%
+% G_{\ell,ji}^E
+% =
+% {W_{\ell,ji}}.
+%
+% Define:
+%
+% \widetilde W_{\ell,ji}
+% =
+% g_{\ell,ji}^E W_{\ell,ji}.
+%
+% This recovers ordinary edge-wise neural sparsification as the
+% singleton-group special case of the general group formulation.
+%
+% Bias terms are not edges.
+
+
+% ------------------------------------------------------------
+% 2.3 Exact-zero gates
+% ------------------------------------------------------------
+
+\subsection{Exact-Zero Activations from Repeated Structural Gating}
+\label{sec:exact_zero_activation}
+
+% TODO:
+%
+% This section should derive the two bounded gate constructions
+% from the same hard structural indicator.
+%
+% Let
+%
+% m = V - tau,
+%
+% I = I(m > 0).
+
+
+\subsubsection{Repeated Hard Gating and Indicator Idempotence}
+\label{sec:indicator_idempotence}
+
+% TODO:
+%
+% For a hidden unit, the same structural indicator may appear on
+% both incoming and outgoing contributions:
+%
+% I_j W_{2j}
+% ReLU[
+% I_j (W_{1j}^T x + b_j)
+% ].
+%
+% By positive homogeneity of ReLU:
+%
+% =
+% I_j^2 W_{2j}
+% ReLU(W_{1j}^T x + b_j).
+%
+% For a hard indicator:
+%
+% I_j^2 = I_j.
+%
+% This provides two different routes to a differentiable,
+% exact-zero representation.
+
+
+\subsubsection{Bounded RePU from Continuous Gate Multiplication}
+\label{sec:normalized_requ}
+
+% TODO:
+%
+% Route 1:
+% relax the repeated hard indicator before applying idempotence.
+%
+% Replace
+%
+% I_j -> (m_j)_+.
+%
+% Then:
+%
+% I_j^2
+% ->
+% (m_j)_+^2,
+%
+% giving a ReQU/RePU-type gate.
+%
+% Use the bounded default:
+%
+% G_N(m; rho)
+% =
+% (m_+)^2 /
+% [rho^2 + (m_+)^2].
+%
+% Main experiments:
+%
+% rho = 1.
+%
+% Properties:
+% - exact zero for m <= 0;
+% - bounded in [0,1);
+% - continuously adjustable on the active side.
+%
+% This is the default activation used in the main experiments.
+
+
+\subsubsection{Smooth Exact-Zero Gate after Indicator Idempotence}
+\label{sec:smooth_step}
+
+% TODO:
+%
+% Route 2:
+% first use the hard identity
+%
+% I^2 = I,
+%
+% and then smoothly approximate the resulting single indicator.
+%
+% Define:
+%
+% G_S(m; delta)
+% =
+% 0,                         m <= 0
+%
+% exp(-delta/m)
+% -----------------------------------,   0 < m < delta
+% exp(-delta/m) + exp[-delta/(delta-m)]
+%
+% 1,                         m >= delta.
+%
+% Main experiments:
+%
+% delta = 1.
+%
+% Properties:
+% - exact zero;
+% - exact one;
+% - C^\infty transition;
+% - same hard structural event I(m > 0).
+%
+% Conceptual distinction:
+%
+% normalized ReQU:
+% relax first, then multiply;
+%
+% smooth-step:
+% simplify I^2 = I first, then relax.
+
+
+% ------------------------------------------------------------
+% 2.4 Spline flow
+% ------------------------------------------------------------
+
+\subsection{Structure-Aware Spline Posterior Transport}
+\label{sec:spline_flow}
+
+% TODO:
+%
+% Collect latent variables:
+%
+% xi = (U, V, tau)
+%
+% or the corresponding concatenated feature/unit/edge latent blocks.
+%
+% Base distribution:
+%
+% z_0 ~ N(mu_0, diag(sigma_0^2)).
+%
+% Flow:
+%
+% xi = T_psi(z_0).
+%
+% Use complementary coupling masks:
+%
+% xi_A' = xi_A
+%
+% xi_j'
+% =
+% T_{theta_j(xi_A)}(xi_j),
+% j in B,
+%
+% where T is a monotone rational-quadratic spline.
+%
+% The conditioner determines theta_j:
+% spline widths, heights, and derivatives.
+%
+% Two conditioner variants are considered below.
+
+
+\subsubsection{Full-Attention Spline Flow}
+\label{sec:full_attention_spline}
+
+% TODO:
+%
+% High-capacity reference conditioner.
+%
+% Fixed-side coordinates contain:
+% - current latent value;
+% - coordinate identity;
+% - latent role;
+% - group identity;
+% - layer / unit / feature / edge metadata when applicable.
+%
+% Structure:
+%
+% fixed value + metadata tokens
+% ->
+% fixed-side self-attention
+% ->
+% target cross-attention
+% ->
+% spline parameter readout.
+%
+% Target queries may use structural metadata but must not contain
+% the current target random value xi_j.
+%
+% Therefore spline parameters remain functions of xi_A only,
+% preserving the triangular coupling Jacobian.
+
+
+\subsubsection{Lightweight Attention Spline Flow}
+\label{sec:light_attention_spline}
+
+% TODO:
+%
+% Efficient conditioner without self-attention or FFN.
+%
+% Metadata embedding:
+%
+% e_i.
+%
+% For head h, target query:
+%
+% q_j^(h)
+% =
+% Q^(h) e_j.
+%
+% Value-dependent source key:
+%
+% k_i^(h)
+% =
+% K^(h)
+% [
+%   e_i
+%   xi_i
+% ].
+%
+% Attention:
+%
+% alpha_{ji}^{(h)}
+% =
+% softmax_{i in A}
+% [
+% (q_j^(h))^T k_i^(h) / sqrt(d_h)
+% ].
+%
+% Deterministic source value:
+%
+% v_i
+% =
+% [
+%   xi_i
+%   xi_i^2
+%   P_v e_i
+% ].
+%
+% Context:
+%
+% c_j^(h)
+% =
+% sum_{i in A}
+% alpha_{ji}^{(h)} v_i.
+%
+% Use a small number of heads, e.g. H_attn = 2.
+%
+% Linear parameter heads map the resulting contexts to:
+% - spline width logits;
+% - spline height logits;
+% - spline derivative logits.
+%
+% No self-attention.
+% No Transformer FFN.
+% No MLP conditioner.
+%
+% Interpretation:
+%
+% attention determines which fixed latent coordinates matter;
+% spline transport determines how the target coordinate is transformed.
+
+
+% ------------------------------------------------------------
+% 2.5 VI
+% ------------------------------------------------------------
+
+\subsection{Variational Inference and Representation Warmup}
+\label{sec:vi}
+
+% TODO:
+%
+% Variational density:
+%
+% q_psi(xi)
+%
+% induced by the spline flow.
+%
+% Optimize:
+%
+% L(psi)
+% =
+% E_{q_psi(xi)}
+% [
+% log p(D | xi)
+% +
+% log p(xi)
+% -
+% log q_psi(xi)
+% ].
+%
+% Include exact spline log-Jacobian terms through
+% change of variables.
+
+
+\subsubsection{Representation Warmup}
+\label{sec:warmup}
+
+% TODO:
+%
+% During the first E_w epochs:
+%
+% g_g^{like} = 1
+%
+% for all selectable structures in the likelihood.
+%
+% Important:
+% - posterior latent samples are not modified;
+% - prior is evaluated on the actual latent draw;
+% - log q is evaluated on the actual latent draw;
+% - only the likelihood temporarily sees all structural gates as active.
+%
+% After warmup, activate the learned gate normally.
+%
+% Explain this as separating representation learning from
+% subsequent structural sparsification.
+
+
+% ------------------------------------------------------------
+% 2.6 PIP
+% ------------------------------------------------------------
+
+\subsection{Posterior Structural Inference and Inclusion Probabilities}
+\label{sec:pip}
+
+% TODO:
+%
+% Posterior samples:
+%
+% xi^(r) = T_{\hat psi}(z_0^(r)).
+%
+% Regardless of continuous optimization gate,
+% recover the hard structural state using:
+%
+% I_g^(r)
+% =
+% I(V_g^(r) > tau^(r)).
+%
+% Group PIP:
+%
+% \widehat{PIP}_g
+% =
+% (1/R) sum_r I_g^(r).
+
+
+\subsubsection{Feature Inclusion Probabilities}
+
+% TODO:
+%
+% PIP_k^F
+% =
+% P(I_k^F = 1 | D).
+
+
+\subsubsection{Hidden-Unit Inclusion Probabilities}
+
+% TODO:
+%
+% PIP_{\ell j}^U
+% =
+% P(I_{\ell j}^U = 1 | D).
+
+
+\subsubsection{Induced Edge Inclusion Probabilities}
+
+% TODO:
+%
+% First layer:
+%
+% PIP_{1,jk}^{E,ind}
+% =
+% E[
+% I_k^F I_{1j}^U
+% | D
+% ].
+%
+% Hidden layers:
+%
+% PIP_{\ell,ji}^{E,ind}
+% =
+% E[
+% I_{\ell-1,i}^U I_{\ell,j}^U
+% | D
+% ].
+
+
+\subsubsection{Independent Edge Inclusion Probabilities}
+
+% TODO:
+%
+% PIP_{\ell,ji}^E
+% =
+% P(I_{\ell,ji}^E = 1 | D).
+
+
+% ============================================================
+% 3. Experiments
+% ============================================================
+
+\section{Experiments}
+\label{sec:experiments}
+
+
+% ------------------------------------------------------------
+% 3.1 Shallow neural network
+% ------------------------------------------------------------
+
+\subsection{Posterior and Selection Recovery in Shallow Neural Networks}
+\label{sec:shallow}
+
+% Main purpose:
+%
+% posterior fidelity against matched MCMC in a setting where
+% reliable posterior reference computation remains feasible.
+
+
+\subsubsection{Simulation Design}
+\label{sec:shallow_setup}
+
+% TODO:
+%
+% Main setting:
+%
+% n = 240
+% p = 6
+% H_fit = 5
+% H_true = 2
+% p_true = 2
+%
+% active features:
+%
+% x_0, x_3.
+%
+% Gaussian response with sigma^2 = 1.
+%
+% Keep nonlinear teacher and train/validation/test splitting.
+%
+% Flow:
+% K = 4
+% warmup = 500
+% total epochs = 2000
+% R_train = 100.
+%
+% Matched MCMC is used as the posterior reference.
+
+
+\subsubsection{Variable Selection}
+\label{sec:shallow_feature}
+
+% TODO:
+%
+% Evaluate feature-group posterior.
+%
+% Report:
+% - feature PIPs;
+% - VI vs MCMC;
+% - truth active variables x_0 and x_3;
+% - active posterior density;
+% - function MSE.
+%
+% Feature identity is identifiable, so support recovery may be
+% formally assessed here.
+
+
+\subsubsection{Hidden-Unit Selection}
+\label{sec:shallow_unit}
+
+% TODO:
+%
+% Evaluate hidden-unit groups.
+%
+% Report:
+% - ranked VI PIPs;
+% - ranked MCMC PIPs;
+% - posterior density of active functional components;
+% - function recovery.
+%
+% Explicitly state that teacher-unit identities represent a
+% canonical generating representation rather than identifiable
+% posterior labels.
+
+
+\subsubsection{Posterior and Function Recovery}
+\label{sec:shallow_recovery}
+
+% TODO:
+%
+% This is the main posterior-fidelity subsection.
+%
+% Metrics:
+%
+% D_SKL,A
+% D_JS,0
+% D_SKL,joint
+%
+% plus signal MSE / R^2.
+%
+% Figures:
+% - marginal active posterior;
+% - joint 2D HDR posterior;
+% - PIP comparison;
+% - posterior function comparison.
+%
+% MCMC diagnostics are reported in the appendix.
+
+
+\subsubsection{Activation and Spline-Flow Ablations}
+\label{sec:shallow_ablation}
+
+% TODO:
+%
+% Main comparisons:
+%
+% Gate:
+% - normalized ReQU;
+% - smooth-step.
+%
+% Conditioner:
+% - full-attention spline;
+% - lightweight-attention spline.
+%
+% If retained:
+% affine / ReLU results go primarily to the appendix.
+
+
+% ------------------------------------------------------------
+% 3.2 Multilayer MLP
+% ------------------------------------------------------------
+
+\subsection{Structured Selection in Multilayer MLPs}
+\label{sec:mlp}
+
+% Main model:
+%
+% stacked + feature-unit-induced-edge
+%
+% Main objective:
+%
+% structured sparsification and function recovery,
+% rather than exact hidden-neuron label recovery.
+
+
+\subsubsection{Multilayer Architecture}
+\label{sec:mlp_architecture}
+
+% TODO:
+%
+% Main stacked MLP:
+%
+% p
+% -> H_1
+% -> H_2
+% -> 1.
+%
+% Example default:
+%
+% hidden_dims = (5,5).
+%
+% Deeper stress test:
+%
+% hidden_dims = (6,5,4).
+%
+% Main model:
+% stacked architecture.
+%
+% Embedding-output architecture is retained as an architectural
+% ablation rather than the default model.
+
+
+\subsubsection{Variable Selection}
+\label{sec:mlp_feature}
+
+% TODO:
+%
+% Feature-group selection in nonlinear multilayer MLP.
+%
+% Report:
+% - original-variable PIPs;
+% - recovery of active x_0 and x_3;
+% - signal MSE;
+% - structure stability across repeated VI seeds.
+
+
+\subsubsection{Feature--Unit Induced Connectivity}
+\label{sec:mlp_induced}
+
+% TODO:
+%
+% Main structured sparse MLP.
+%
+% Report:
+% - feature PIPs;
+% - layer-wise unit PIPs;
+% - expected active units;
+% - induced edge PIPs;
+% - induced edge density;
+% - network connectivity visualization.
+%
+% Main functional result:
+%
+% signal MSE versus induced edge density.
+
+
+\subsubsection{Independent Edge Sparsification}
+\label{sec:mlp_edge}
+
+% TODO:
+%
+% Each edge is treated as a singleton group.
+%
+% Report:
+% - edge PIP matrices;
+% - expected edge density;
+% - signal MSE;
+% - comparison against induced connectivity.
+%
+% Do not use deep edge-label truth as the primary metric.
+
+
+\subsubsection{MSE--Sparsity Trade-Off}
+\label{sec:mse_sparsity}
+
+% TODO:
+%
+% For posterior inclusion thresholds c:
+%
+% construct sparse posterior structures
+%
+% and plot:
+%
+% signal MSE
+% versus
+% retained edge density.
+%
+% Mark the median probability model:
+%
+% c = 0.5.
+%
+% Compare:
+% - feature-unit induced connectivity;
+% - independent edge sparsification.
+
+
+\subsubsection{Stacked versus Embedding--Output Parameterizations}
+\label{sec:embedding_ablation}
+
+% TODO:
+%
+% Present the architectural ablation.
+%
+% Main current conclusion:
+%
+% - feature-unit induced grouping substantially alleviates
+%   collapse in the redundant embedding-output parameterization;
+% - however, stacked induced remains substantially better in
+%   function recovery and computational efficiency.
+%
+% Therefore stacked + induced is the primary MLP architecture.
+
+
+\subsubsection{Network Depth}
+\label{sec:depth}
+
+% TODO:
+%
+% Test whether the same group activation and spline-flow construction
+% remains effective when moving from two hidden layers to a modestly
+% deeper MLP.
+%
+% This is a scalability/generalization check,
+% not a search for the optimal depth.
+
+
+% ------------------------------------------------------------
+% 3.3 Real-world longitudinal data
+% ------------------------------------------------------------
+
+\subsection{Real-World Longitudinal Data Application}
+\label{sec:real_data}
+
+
+\subsubsection{Dataset and Prediction Task}
+\label{sec:real_dataset}
+
+% TODO:
+%
+% Select a longitudinal dataset with:
+% - repeated observations per subject;
+% - interpretable longitudinal covariates;
+% - a regression or otherwise compatible predictive outcome;
+% - natural grouping of measurements or variable domains.
+
+
+\subsubsection{Longitudinal Group Construction}
+\label{sec:real_groups}
+
+% TODO:
+%
+% Define meaningful groups from:
+% - repeated measurements of the same biomarker;
+% - temporal measurements;
+% - clinical domains;
+% - variable families.
+%
+% Avoid reducing the real-data demonstration to arbitrary
+% singleton-variable sparsification unless needed as a baseline.
+
+
+\subsubsection{Sparse Multilayer Posterior}
+\label{sec:real_sparse_mlp}
+
+% TODO:
+%
+% Main model:
+%
+% stacked + feature-unit-induced-edge
+%
+% with:
+%
+% normalized ReQU
+% +
+% spline posterior transport.
+%
+% Report:
+% - group PIPs;
+% - unit sparsity;
+% - induced connectivity;
+% - posterior predictive function.
+
+
+\subsubsection{Predictive and Structural Results}
+\label{sec:real_results}
+
+% TODO:
+%
+% No support truth exists in real data.
+%
+% Therefore emphasize:
+% - held-out prediction;
+% - selected longitudinal groups;
+% - sparse network structure;
+% - posterior inclusion uncertainty;
+% - interpretability of selected longitudinal effects.
+
+
+% ============================================================
+% 4. Conclusion
+% ============================================================
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+% TODO:
+%
+% Summarize the unified framework:
+%
+% group-structured latent spike-and-slab
+% +
+% bounded exact-zero activation
+% +
+% structure-aware spline posterior transport.
+%
+% Emphasize the progression:
+%
+% variable selection
+% ->
+% hidden-unit sparsification
+% ->
+% induced neural connectivity
+% ->
+% multilayer sparse neural networks.
+%
+% Do not describe grouped or nonlinear modeling as future work;
+% they are now central contributions of the paper.
+
+
+% ============================================================
+% Required / recommended ICLR statements
+% ============================================================
+
+\subsection*{AI use statement}
+
+% TODO: replace with the final ICLR-compliant disclosure.
+We used generative AI tools to assist with manuscript editing and
+software development. All AI-assisted text, mathematical expressions,
+and code were reviewed and verified by the authors. The authors take
+full responsibility for the final content of this work.
+
+
+\subsection*{Reproducibility statement}
+
+% TODO:
+% Summarize:
+% - simulation generators;
+% - model and flow implementation;
+% - posterior sampling;
+% - MCMC reference settings for shallow experiments;
+% - seeds and computing environments;
+% - supplementary code and data.
+
+
+% ============================================================
+% References
+% ============================================================
+
+\bibliography{references}
+\bibliographystyle{iclr2027_conference}
+
+
+% ============================================================
+% Appendix
+% ============================================================
+
+\appendix
+
+
+\section{Additional Methodological Details}
+\label{app:method}
+
+% TODO:
+%
+% Potential material:
+% - complete derivation of normalized ReQU and smooth-step;
+% - smooth-step C^\infty properties;
+% - exact spline formulas;
+% - coupling masks;
+% - metadata definitions;
+% - full-attention architecture details;
+% - lightweight-attention implementation details;
+% - embedding-output parameterization.
+
+
+\section{Additional Shallow-Network Experiments}
+\label{app:shallow}
+
+% TODO:
+%
+% - full MCMC diagnostics;
+% - additional posterior-density plots;
+% - affine coupling ablations;
+% - ReLU / unbounded gate controls if retained;
+% - additional seeds.
+
+
+\section{Additional Multilayer MLP Experiments}
+\label{app:mlp}
+
+% TODO:
+%
+% - full embedding-output results;
+% - independent edge PIP matrices;
+% - induced connectivity matrices;
+% - additional depths;
+% - additional VI seeds;
+% - runtime and parameter-count tables.
+
+
+\section{Real-World Data Details}
+\label{app:real}
+
+% TODO:
+%
+% - preprocessing;
+% - missing-data handling;
+% - longitudinal group definitions;
+% - train/validation/test split;
+% - full selected-group tables.
+
+
+\end{document}

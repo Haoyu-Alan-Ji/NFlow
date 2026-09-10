@@ -1,0 +1,20 @@
+{
+  "pip_rmse_truth": 0.0698359983580579,
+  "pip_rmse_mcmc": 0.13346677020891753,
+  "true_active_skl": 0.2648454929254531,
+  "true_active_skl_mean": 0.2648454929254531,
+  "zero_js": 0.025519825915260374,
+  "zero_js_mean": 0.025247785649765497,
+  "n_truth_active": 2,
+  "n_truth_zero": 4,
+  "n_valid_true_active_skl": 2,
+  "selection_mode": "feature_group",
+  "reference_compatibility": "exact",
+  "rmse_with_mcmc": 0.13346677020891753,
+  "true_skl": 0.2648454929254531,
+  "conditional_joint_skl": 0.569246242785535,
+  "rat_joint_active_draws": 5000,
+  "mcmc_joint_active_draws": 20000,
+  "rat_joint_active_prob": 1.0,
+  "mcmc_joint_active_prob": 1.0
+}

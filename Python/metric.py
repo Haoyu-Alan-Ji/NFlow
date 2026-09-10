@@ -8,7 +8,13 @@ import pandas as pd
 from scipy.stats import gaussian_kde
 from sklearn.metrics import average_precision_score, roc_auc_score
 import torch
-from .utils import to_numpy
+try:
+    from .utils import to_numpy
+except ImportError:  # Standalone experiment bundle fallback.
+    def to_numpy(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
 import matplotlib.pyplot as plt
 
 Array = np.ndarray
@@ -1664,9 +1670,9 @@ def group_posterior_summary(decoder, xi, method="RaT", epoch=None):
 
 
 def unit_group_summary(decoder, xi, method="RaT", epoch=None):
-    """Single-group/single-gate diagnostics for each shallow hidden unit."""
+    """Single-gate diagnostics for each hidden unit across all layers."""
 
-    if decoder.selection_mode != "unit_group":
+    if not getattr(decoder, "has_unit_gates", False):
         return pd.DataFrame()
 
     with torch.no_grad():
@@ -1678,7 +1684,9 @@ def unit_group_summary(decoder, xi, method="RaT", epoch=None):
             "method": method,
             "epoch": epoch,
             "block": meta["block"],
+            "layer": meta.get("layer", meta["block"]),
             "unit": meta["unit"],
+            "global_unit": meta.get("global_unit", index),
             "group_id": meta["group_id"],
             "unit_pip": float(units["active"][:, index].float().mean()),
             "gate_mean": float(units["gate"][:, index].mean()),
@@ -1701,14 +1709,20 @@ def unit_group_summary(decoder, xi, method="RaT", epoch=None):
     table = pd.DataFrame(rows)
     if not table.empty:
         rank = table["unit_pip"].rank(method="first", ascending=False).astype(int)
-        table.insert(5, "posterior_rank", rank)
-        table = table.sort_values(["block", "posterior_rank"]).reset_index(drop=True)
+        table.insert(7, "posterior_rank", rank)
+        table = table.sort_values(["layer", "posterior_rank"]).reset_index(drop=True)
     return table
 
 
 def _ranked_unit_selection_draws(decoder, xi):
     units = decoder.unit_semantics(xi)
-    order = torch.argsort(units["effective_strength"], dim=1, descending=True)
+    # Structural activity is the primary key. This keeps an active unit ahead
+    # of an inactive unit even when a tiny positive smooth-step margin rounds
+    # its numerical gate/effective strength to zero.
+    effective = units["effective_strength"]
+    offset = effective.amax(dim=1, keepdim=True) + 1.0
+    ranking_key = effective + units["active"].to(effective.dtype) * offset
+    order = torch.argsort(ranking_key, dim=1, descending=True)
     return {
         "pip_draws": torch.gather(units["active"], 1, order),
         "slab_strength": torch.gather(units["slab_strength"], 1, order),
@@ -1719,18 +1733,38 @@ def _ranked_unit_selection_draws(decoder, xi):
 
 
 def _feature_selection_draws(decoder, xi):
-    semantics = decoder.group_semantics(xi)
-    slab_norm = decoder.group_slab_norms(xi)
+    semantics = decoder.feature_semantics(xi)
     return {
         "pip_draws": semantics["active"],
-        "slab_strength": slab_norm,
-        "effective_strength": slab_norm * semantics["gate"],
+        "slab_strength": semantics["slab_strength"],
+        "effective_strength": semantics["effective_strength"],
+    }
+
+
+def _ranked_primary_edge_draws(decoder, xi):
+    """Permutation-invariant edge coordinates from the first linear map."""
+
+    edge = decoder.edge_semantics(xi)[decoder.primary_edge_parameter]
+    active = edge["active"].reshape(xi.shape[0], -1)
+    slab = edge["weight"].abs().reshape(xi.shape[0], -1)
+    effective = edge["effective_strength"].reshape(xi.shape[0], -1)
+    offset = effective.amax(dim=1, keepdim=True) + 1.0
+    order = torch.argsort(
+        effective + active.to(effective.dtype) * offset,
+        dim=1,
+        descending=True,
+    )
+    return {
+        "pip_draws": torch.gather(active, 1, order),
+        "slab_strength": torch.gather(slab, 1, order),
+        "effective_strength": torch.gather(effective, 1, order),
+        "parameter": decoder.primary_edge_parameter,
     }
 
 
 def _truth_mask(decoder, truth):
     if decoder.selection_mode == "unit_group":
-        n_slots = decoder.H
+        n_slots = int(getattr(decoder, "n_units", decoder.H))
         n_true = int(truth["n_true_units"])
         if n_true > n_slots:
             raise ValueError("n_true_units exceeds the fitted hidden-unit slots.")
@@ -1742,7 +1776,7 @@ def _truth_mask(decoder, truth):
     feature_true = np.asarray(truth["feature_true"], dtype=float).reshape(-1)
     if feature_true.size != decoder.input_dim:
         raise ValueError("feature_true length does not match decoder.input_dim.")
-    return feature_true > 0.5, [f"feature_{j}" for j in range(feature_true.size)]
+    return feature_true > 0.5, [f"x{j}" for j in range(feature_true.size)]
 
 
 def _safe_nan_summary(values, reducer):
@@ -1758,34 +1792,73 @@ def grouped_recovery_metrics(
     mcmc_xi,
     truth,
     min_active_draws=50,
+    compatibility="exact",
 ):
     """
     Group-selection recovery against the exactly matched MCMC model.
 
-    ``true_active_skl`` is the VI--MCMC conditional slab-strength SKL on
-    teacher-active features or permutation-invariant unit ranks. It is not a
-    KL divergence from a continuous posterior to a point-valued truth.
+    For feature/unit modes, ``true_active_skl`` is the VI--MCMC conditional
+    slab-strength SKL on teacher-active coordinates. For edge-related modes it
+    is computed on MCMC-active ranked effective edge strengths from the first
+    selectable linear layer. It is never a KL divergence to a point truth.
     """
 
-    if rat_decoder.compatibility_signature() != mcmc_decoder.compatibility_signature():
-        raise ValueError("MCMC and VI must use exactly the same grouped decoder.")
+    if compatibility not in {"exact", "structural"}:
+        raise ValueError("compatibility must be exact or structural.")
+    rat_signature = (
+        rat_decoder.compatibility_signature()
+        if compatibility == "exact" else rat_decoder.structural_signature()
+    )
+    mcmc_signature = (
+        mcmc_decoder.compatibility_signature()
+        if compatibility == "exact" else mcmc_decoder.structural_signature()
+    )
+    if rat_signature != mcmc_signature:
+        adjective = "exactly" if compatibility == "exact" else "structurally"
+        raise ValueError(f"MCMC and VI decoders are not {adjective} compatible.")
 
     if rat_decoder.selection_mode == "unit_group":
         rat = _ranked_unit_selection_draws(rat_decoder, rat_xi)
         mcmc = _ranked_unit_selection_draws(mcmc_decoder, mcmc_xi)
         target_type = "unit_rank"
-    else:
+        reference_partition = False
+    elif rat_decoder.selection_mode == "feature_group":
         rat = _feature_selection_draws(rat_decoder, rat_xi)
         mcmc = _feature_selection_draws(mcmc_decoder, mcmc_xi)
         target_type = "feature"
+        reference_partition = False
+    elif rat_decoder.selection_mode in {
+        "feature_unit_induced_edge", "edge_group"
+    }:
+        rat = _ranked_primary_edge_draws(rat_decoder, rat_xi)
+        mcmc = _ranked_primary_edge_draws(mcmc_decoder, mcmc_xi)
+        target_type = (
+            "induced_edge_rank"
+            if rat_decoder.selection_mode == "feature_unit_induced_edge"
+            else "independent_edge_rank"
+        )
+        reference_partition = True
+    else:
+        raise ValueError(f"Unsupported selection mode: {rat_decoder.selection_mode}")
 
-    truth_active, labels = _truth_mask(rat_decoder, truth)
     rat_active = rat["pip_draws"].detach().cpu().numpy().astype(bool)
     mcmc_active = mcmc["pip_draws"].detach().cpu().numpy().astype(bool)
-    rat_strength = rat["slab_strength"].detach().cpu().numpy()
-    mcmc_strength = mcmc["slab_strength"].detach().cpu().numpy()
+    strength_key = (
+        "effective_strength" if reference_partition else "slab_strength"
+    )
+    rat_strength = rat[strength_key].detach().cpu().numpy()
+    mcmc_strength = mcmc[strength_key].detach().cpu().numpy()
     rat_pip = rat_active.mean(axis=0)
     mcmc_pip = mcmc_active.mean(axis=0)
+    if reference_partition:
+        truth_active = mcmc_pip > 0.5
+        labels = [
+            f"{target_type}_{rank + 1}" for rank in range(len(mcmc_pip))
+        ]
+        partition_source = "matched_mcmc_pip_gt_0.5"
+    else:
+        truth_active, labels = _truth_mask(rat_decoder, truth)
+        partition_source = "teacher_truth"
     rows = []
     active_skl = []
     zero_js = []
@@ -1812,11 +1885,16 @@ def grouped_recovery_metrics(
             "target": target,
             "label": label,
             "truth_active": bool(truth_active[target]),
-            "truth_pip": float(truth_active[target]),
+            "truth_pip": (
+                np.nan if reference_partition else float(truth_active[target])
+            ),
+            "partition_source": partition_source,
             "rat_pip": float(rat_pip[target]),
             "mcmc_pip": float(mcmc_pip[target]),
-            "pip_error_truth": float(
-                rat_pip[target] - truth_active[target]
+            "pip_error_truth": (
+                np.nan if reference_partition else float(
+                    rat_pip[target] - truth_active[target]
+                )
             ),
             "pip_error": float(rat_pip[target] - mcmc_pip[target]),
             "conditional_slab_skl": skl,
@@ -1828,8 +1906,10 @@ def grouped_recovery_metrics(
     active_skl = np.asarray(active_skl, dtype=float)
     zero_js = np.asarray(zero_js, dtype=float)
     summary = {
-        "pip_rmse_truth": float(
-            np.sqrt(np.mean((rat_pip - truth_active.astype(float)) ** 2))
+        "pip_rmse_truth": (
+            np.nan if reference_partition else float(np.sqrt(np.mean(
+                (rat_pip - truth_active.astype(float)) ** 2
+            )))
         ),
         "pip_rmse_mcmc": float(np.sqrt(np.mean((rat_pip - mcmc_pip) ** 2))),
         "true_active_skl": _safe_nan_summary(active_skl, np.median),
@@ -1840,7 +1920,11 @@ def grouped_recovery_metrics(
         "n_truth_zero": int((~truth_active).sum()),
         "n_valid_true_active_skl": int(np.isfinite(active_skl).sum()),
         "selection_mode": rat_decoder.selection_mode,
+        "target_type": target_type,
+        "partition_source": partition_source,
+        "reference_compatibility": compatibility,
     }
+    summary["active_skl"] = summary["true_active_skl"]
     summary["rmse_with_mcmc"] = summary["pip_rmse_mcmc"]
     summary["true_skl"] = summary["true_active_skl"]
 
@@ -1850,20 +1934,38 @@ def grouped_recovery_metrics(
 @torch.no_grad()
 def true_active_joint_draws(decoder, xi, truth):
     """
-    Return the two truth-active slab-strength coordinates conditional on both
-    targets being active in the same posterior draw.
+    Return the two comparison coordinates conditional on both being active.
 
     Unit selection uses permutation-invariant ranked units. Feature selection
-    uses the two truth-active raw predictors.
+    uses the two truth-active raw predictors. Edge-related modes use the two
+    strongest active-first ranked effective edges in the first linear map.
     """
 
     if decoder.selection_mode == "unit_group":
         draws = _ranked_unit_selection_draws(decoder, xi)
-    else:
+        truth_active, labels = _truth_mask(decoder, truth)
+        active_idx = np.flatnonzero(truth_active)
+    elif decoder.selection_mode == "feature_group":
         draws = _feature_selection_draws(decoder, xi)
+        truth_active, labels = _truth_mask(decoder, truth)
+        active_idx = np.flatnonzero(truth_active)
+    elif decoder.selection_mode in {
+        "feature_unit_induced_edge", "edge_group"
+    }:
+        draws = _ranked_primary_edge_draws(decoder, xi)
+        prefix = (
+            "induced_edge_rank"
+            if decoder.selection_mode == "feature_unit_induced_edge"
+            else "independent_edge_rank"
+        )
+        labels = [
+            f"{prefix}_{rank + 1}"
+            for rank in range(draws["pip_draws"].shape[1])
+        ]
+        active_idx = np.asarray([0, 1], dtype=int)
+    else:
+        raise ValueError(f"Unsupported selection mode: {decoder.selection_mode}")
 
-    truth_active, labels = _truth_mask(decoder, truth)
-    active_idx = np.flatnonzero(truth_active)
     if len(active_idx) != 2:
         raise ValueError(
             "true_active_joint_draws requires exactly two truth-active targets."
@@ -1871,7 +1973,13 @@ def true_active_joint_draws(decoder, xi, truth):
 
     j1, j2 = active_idx
     active = draws["pip_draws"]
-    strength = draws["slab_strength"]
+    strength = draws[
+        "effective_strength"
+        if decoder.selection_mode in {
+            "feature_unit_induced_edge", "edge_group"
+        }
+        else "slab_strength"
+    ]
     joint_active = active[:, j1] & active[:, j2]
     values = strength[joint_active][:, [j1, j2]].detach().cpu().numpy()
 
@@ -1883,6 +1991,332 @@ def true_active_joint_draws(decoder, xi, truth):
     }
 
 
+def grouped_selection_draws(decoder, xi):
+    """Public selection draws in ranked-unit or original-feature coordinates."""
+
+    if decoder.selection_mode == "unit_group":
+        return _ranked_unit_selection_draws(decoder, xi)
+    if decoder.selection_mode == "feature_group":
+        return _feature_selection_draws(decoder, xi)
+    if decoder.selection_mode in {
+        "feature_unit_induced_edge", "edge_group"
+    }:
+        semantics = decoder.group_semantics(xi)
+        slab = decoder.group_slab_norms(xi)
+        return {
+            "pip_draws": semantics["active"],
+            "slab_strength": slab,
+            "effective_strength": slab * semantics["gate"],
+        }
+    raise ValueError("grouped_selection_draws requires a grouped decoder.")
+
+
+@torch.no_grad()
+def mlp_structure_summary(decoder, xi, method="VI"):
+    """PIP tables and the mode-specific expected structure density."""
+
+    payload = {
+        "feature": pd.DataFrame(),
+        "unit": pd.DataFrame(),
+        "edges": {},
+    }
+    if decoder.has_feature_gates:
+        feature = decoder.feature_semantics(xi)
+        payload["feature"] = pd.DataFrame({
+            "method": method,
+            "feature": np.arange(decoder.input_dim),
+            "pip": feature["active"].float().mean(dim=0).cpu().numpy(),
+            "gate_mean": feature["gate"].mean(dim=0).cpu().numpy(),
+            "slab_strength_mean": (
+                feature["slab_strength"].mean(dim=0).cpu().numpy()
+            ),
+        })
+
+    if decoder.has_unit_gates:
+        units = decoder.unit_semantics(xi)
+        rows = []
+        for global_unit, meta in enumerate(decoder.unit_groups):
+            rows.append({
+                "method": method,
+                "layer": int(meta["layer"]) + 1,
+                "unit": int(meta["unit"]),
+                "global_unit": int(global_unit),
+                "pip": float(
+                    units["active"][:, global_unit].float().mean()
+                ),
+                "gate_mean": float(units["gate"][:, global_unit].mean()),
+                "slab_strength_mean": float(
+                    units["slab_strength"][:, global_unit].mean()
+                ),
+            })
+        payload["unit"] = pd.DataFrame(rows)
+
+    if decoder.selection_mode in {
+        "feature_unit_induced_edge", "edge_group"
+    }:
+        edge_blocks = decoder.edge_semantics(xi)
+        active_parts = []
+        for name, block in edge_blocks.items():
+            active = block["active"].float()
+            gate = block["gate"]
+            strength = block["effective_strength"]
+            active_parts.append(active.reshape(xi.shape[0], -1))
+            rows = []
+            for target in range(active.shape[1]):
+                for source in range(active.shape[2]):
+                    rows.append({
+                        "method": method,
+                        "parameter": name,
+                        "layer": int(block["layer"]),
+                        "target": target,
+                        "source": source,
+                        "pip": float(active[:, target, source].mean()),
+                        "gate_mean": float(gate[:, target, source].mean()),
+                        "effective_strength_mean": float(
+                            strength[:, target, source].mean()
+                        ),
+                    })
+            payload["edges"][name] = pd.DataFrame(rows)
+        all_active = torch.cat(active_parts, dim=1)
+        payload["expected_structure_density"] = float(all_active.mean())
+    else:
+        feature = decoder.feature_semantics(xi)
+        payload["expected_structure_density"] = float(
+            feature["active"].float().mean()
+        )
+    payload["n_candidate_edges"] = int(decoder.n_candidate_edges)
+    return payload
+
+
+def _induced_binary_edge_masks(decoder, feature_mask, unit_mask):
+    feature_mask = np.asarray(feature_mask, dtype=bool)
+    unit_mask = np.asarray(unit_mask, dtype=bool)
+    masks = {}
+    for item in decoder.layout.linear_weight_specs:
+        role = item["role"]
+        shape = item["shape"]
+        if role == "embedding_weight":
+            mask = np.broadcast_to(feature_mask[None, :], shape)
+        elif role == "hidden_weight":
+            layer = int(item["layer"])
+            current = unit_mask[decoder.layer_slices[layer]]
+            if layer == 0 and decoder.architecture_mode == "stacked":
+                mask = current[:, None] & feature_mask[None, :]
+            elif layer == 0:
+                mask = np.broadcast_to(current[:, None], shape)
+            else:
+                previous = unit_mask[decoder.layer_slices[layer - 1]]
+                mask = current[:, None] & previous[None, :]
+        elif role == "output_weight":
+            last = unit_mask[decoder.layer_slices[-1]]
+            mask = np.broadcast_to(last[None, :], shape)
+        elif role == "linear":
+            mask = np.broadcast_to(feature_mask[None, :], shape)
+        else:
+            raise RuntimeError(f"Unsupported linear-map role: {role}")
+        masks[item["name"]] = np.asarray(mask, dtype=bool)
+    return masks
+
+
+@torch.no_grad()
+def mse_edge_density_curve(
+    decoder,
+    xi,
+    X,
+    signal,
+    thresholds=tuple(np.arange(0.1, 1.0, 0.1)),
+    method="VI",
+):
+    """Posterior-mean function MSE after PIP-thresholded sparsification."""
+
+    if decoder.selection_mode not in {
+        "feature_unit_induced_edge", "edge_group"
+    }:
+        raise ValueError("MSE--density curves require an edge-related mode.")
+    X = torch.as_tensor(X, device=xi.device, dtype=xi.dtype)
+    signal = torch.as_tensor(signal, device=xi.device, dtype=xi.dtype)
+    structure = mlp_structure_summary(decoder, xi, method=method)
+    rows = []
+
+    for threshold in thresholds:
+        threshold = float(threshold)
+        if decoder.selection_mode == "feature_unit_induced_edge":
+            feature_pip = structure["feature"].sort_values("feature")["pip"].to_numpy()
+            unit_pip = structure["unit"].sort_values("global_unit")["pip"].to_numpy()
+            feature_mask = feature_pip > threshold
+            unit_mask = unit_pip > threshold
+            edge_masks = _induced_binary_edge_masks(
+                decoder, feature_mask, unit_mask
+            )
+            structural_mask = {
+                "feature": feature_mask,
+                "unit": unit_mask,
+            }
+        else:
+            edge_masks = {}
+            for name, table in structure["edges"].items():
+                shape = next(
+                    item["shape"] for item in decoder.layout.linear_weight_specs
+                    if item["name"] == name
+                )
+                edge_masks[name] = (
+                    table.sort_values(["target", "source"])["pip"]
+                    .to_numpy().reshape(shape) > threshold
+                )
+            structural_mask = {"edge": edge_masks}
+
+        n_active = int(sum(mask.sum() for mask in edge_masks.values()))
+        prediction = decoder(
+            X, xi, structural_mask=structural_mask
+        ).mean(dim=0)
+        mse = float((prediction - signal).square().mean())
+        rows.append({
+            "method": method,
+            "pip_threshold": threshold,
+            "median_probability_structure": bool(
+                abs(threshold - 0.5) < 1e-12
+            ),
+            "n_active_edges": n_active,
+            "n_candidate_edges": int(decoder.n_candidate_edges),
+            "edge_density": float(n_active / decoder.n_candidate_edges),
+            "signal_mse": mse,
+        })
+    return pd.DataFrame(rows)
+
+
+def plot_mse_edge_density_curve(vi_curve, mcmc_curve, title=None):
+    """Overlay VI and matched-MCMC sparsification paths."""
+
+    vi_curve = pd.DataFrame(vi_curve).sort_values("pip_threshold")
+    mcmc_curve = pd.DataFrame(mcmc_curve).sort_values("pip_threshold")
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.plot(
+        vi_curve["edge_density"], vi_curve["signal_mse"],
+        marker="o", color="tab:blue", label="VI",
+    )
+    ax.plot(
+        mcmc_curve["edge_density"], mcmc_curve["signal_mse"],
+        marker="s", linestyle="--", color="tab:orange", label="MCMC",
+    )
+    for table, color in ((vi_curve, "tab:blue"), (mcmc_curve, "tab:orange")):
+        median = table[table["median_probability_structure"]]
+        if not median.empty:
+            ax.scatter(
+                median["edge_density"], median["signal_mse"],
+                s=85, facecolors="none", edgecolors=color, linewidths=1.8,
+                zorder=4,
+            )
+    ax.set_xlabel("Edge density")
+    ax.set_ylabel("Signal MSE")
+    if title is not None:
+        ax.set_title(title)
+    ax.text(
+        0.02, 0.98, "Open marker: PIP = 0.5",
+        transform=ax.transAxes, va="top", fontsize=8,
+    )
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
+
+def true_active_joint_skl(
+    rat_decoder,
+    rat_xi,
+    mcmc_decoder,
+    mcmc_xi,
+    truth,
+    min_draws=50,
+    compatibility="exact",
+    max_draws=None,
+    random_seed=123,
+):
+    """Conditional joint SKL for two truth-active targets, or NaN."""
+
+    if compatibility == "exact":
+        rat_signature = rat_decoder.compatibility_signature()
+        mcmc_signature = mcmc_decoder.compatibility_signature()
+    elif compatibility == "structural":
+        rat_signature = rat_decoder.structural_signature()
+        mcmc_signature = mcmc_decoder.structural_signature()
+    else:
+        raise ValueError("compatibility must be exact or structural.")
+    if rat_signature != mcmc_signature:
+        raise ValueError("MCMC and VI decoder structures do not match.")
+
+    rat = true_active_joint_draws(rat_decoder, rat_xi, truth)
+    mcmc = true_active_joint_draws(mcmc_decoder, mcmc_xi, truth)
+    value = np.nan
+    if (
+        rat["n_joint_active"] >= int(min_draws)
+        and mcmc["n_joint_active"] >= int(min_draws)
+    ):
+        try:
+            rat_values, mcmc_values = _subsample_joint_values(
+                rat["values"],
+                mcmc["values"],
+                max_draws=max_draws,
+                min_draws=min_draws,
+                random_seed=random_seed,
+            )
+            value = float(kde_skl_2d(rat_values, mcmc_values))
+        except (ValueError, np.linalg.LinAlgError):
+            value = np.nan
+    return {
+        "conditional_joint_skl": value,
+        "rat_joint_active_draws": rat["n_joint_active"],
+        "mcmc_joint_active_draws": mcmc["n_joint_active"],
+        "rat_joint_active_prob": rat["joint_active_prob"],
+        "mcmc_joint_active_prob": mcmc["joint_active_prob"],
+        "joint_density_max_draws": max_draws,
+        "joint_density_random_seed": int(random_seed),
+    }
+
+
+def _subsample_joint_values(
+    rat_values,
+    mcmc_values,
+    *,
+    max_draws,
+    min_draws,
+    random_seed,
+):
+    """Deterministic shared sampling rule for both SKL and density plots."""
+
+    rat_values = np.asarray(rat_values, dtype=float)
+    mcmc_values = np.asarray(mcmc_values, dtype=float)
+    if max_draws is None:
+        return rat_values, mcmc_values
+    max_draws = int(max_draws)
+    if max_draws < int(min_draws):
+        raise ValueError("max_draws cannot be below min_draws.")
+    rng = np.random.default_rng(int(random_seed))
+    if rat_values.shape[0] > max_draws:
+        rat_values = rat_values[
+            rng.choice(rat_values.shape[0], max_draws, replace=False)
+        ]
+    if mcmc_values.shape[0] > max_draws:
+        mcmc_values = mcmc_values[
+            rng.choice(mcmc_values.shape[0], max_draws, replace=False)
+        ]
+    return rat_values, mcmc_values
+
+
+def _hdr_density_thresholds(density, dx, dy, masses=(0.50, 0.80, 0.95)):
+    density = np.asarray(density, dtype=float)
+    order = np.argsort(density.ravel())[::-1]
+    sorted_density = density.ravel()[order]
+    probability = np.cumsum(sorted_density * float(dx) * float(dy))
+    probability = probability / max(float(probability[-1]), 1e-300)
+    thresholds = []
+    for mass in masses:
+        index = min(
+            int(np.searchsorted(probability, float(mass), side="left")),
+            sorted_density.size - 1,
+        )
+        thresholds.append(float(sorted_density[index]))
+    return np.asarray(thresholds, dtype=float)
+
+
 def plot_true_active_joint_density(
     rat_decoder,
     rat_xi,
@@ -1891,18 +2325,26 @@ def plot_true_active_joint_density(
     truth,
     min_draws=50,
     n_grid=100,
+    axis_limits=None,
+    rat_label="VI",
+    mcmc_label="MCMC",
+    title="True-active joint posterior density",
+    hdr_masses=(0.50, 0.80, 0.95),
+    max_draws=None,
+    scatter_n=150,
+    random_seed=123,
 ):
-    """Overlay RaT and MCMC 2D KDE contours for two truth-active targets."""
+    """Overlay matched 50/80/95% HDR KDE contours and light scatter."""
 
     rat = true_active_joint_draws(rat_decoder, rat_xi, truth)
     mcmc = true_active_joint_draws(mcmc_decoder, mcmc_xi, truth)
 
     print(
-        f"joint-active draws: RaT={rat['n_joint_active']}, "
+        f"joint-active draws: VI={rat['n_joint_active']}, "
         f"MCMC={mcmc['n_joint_active']}"
     )
     print(
-        f"joint-active probability: RaT={rat['joint_active_prob']:.4f}, "
+        f"joint-active probability: VI={rat['joint_active_prob']:.4f}, "
         f"MCMC={mcmc['joint_active_prob']:.4f}"
     )
 
@@ -1913,24 +2355,40 @@ def plot_true_active_joint_density(
         print("Joint density not plotted: insufficient joint-active posterior draws.")
         return None, None
 
-    Xr = rat["values"]
-    Xm = mcmc["values"]
+    Xr, Xm = _subsample_joint_values(
+        rat["values"],
+        mcmc["values"],
+        max_draws=max_draws,
+        min_draws=min_draws,
+        random_seed=random_seed,
+    )
+    rng = np.random.default_rng(int(random_seed) + 1)
+    print(f"joint-density draws used: VI={len(Xr)}, MCMC={len(Xm)}")
 
+    joint_skl = np.nan
     try:
         joint_skl = kde_skl_2d(Xr, Xm)
         print(f"conditional joint SKL: {joint_skl:.4f}")
     except (ValueError, np.linalg.LinAlgError):
         print("conditional joint SKL: NA")
 
-    x_all = np.concatenate([Xr[:, 0], Xm[:, 0]])
-    y_all = np.concatenate([Xr[:, 1], Xm[:, 1]])
-    x_lo, x_hi = np.quantile(x_all, [0.005, 0.995])
-    y_lo, y_hi = np.quantile(y_all, [0.005, 0.995])
-    x_pad = 0.10 * (x_hi - x_lo + 1e-8)
-    y_pad = 0.10 * (y_hi - y_lo + 1e-8)
+    if axis_limits is None:
+        x_all = np.concatenate([Xr[:, 0], Xm[:, 0]])
+        y_all = np.concatenate([Xr[:, 1], Xm[:, 1]])
+        x_lo, x_hi = np.quantile(x_all, [0.005, 0.995])
+        y_lo, y_hi = np.quantile(y_all, [0.005, 0.995])
+        x_pad = 0.10 * (x_hi - x_lo + 1e-8)
+        y_pad = 0.10 * (y_hi - y_lo + 1e-8)
+        axis_limits = (
+            float(x_lo - x_pad),
+            float(x_hi + x_pad),
+            float(y_lo - y_pad),
+            float(y_hi + y_pad),
+        )
+    x_lo, x_hi, y_lo, y_hi = axis_limits
 
-    gx = np.linspace(x_lo - x_pad, x_hi + x_pad, int(n_grid))
-    gy = np.linspace(y_lo - y_pad, y_hi + y_pad, int(n_grid))
+    gx = np.linspace(x_lo, x_hi, int(n_grid))
+    gy = np.linspace(y_lo, y_hi, int(n_grid))
     xx, yy = np.meshgrid(gx, gy)
     points = np.vstack([xx.ravel(), yy.ravel()])
 
@@ -1939,18 +2397,51 @@ def plot_true_active_joint_density(
         kde_mcmc = gaussian_kde(Xm.T)
         z_rat = kde_rat(points).reshape(xx.shape)
         z_mcmc = kde_mcmc(points).reshape(xx.shape)
-    except np.linalg.LinAlgError:
+    except (ValueError, np.linalg.LinAlgError):
         print("Joint density not plotted: singular KDE covariance.")
         return None, None
 
+    dx = gx[1] - gx[0]
+    dy = gy[1] - gy[0]
+    rat_levels = np.unique(np.sort(
+        _hdr_density_thresholds(z_rat, dx, dy, hdr_masses)
+    ))
+    mcmc_levels = np.unique(np.sort(
+        _hdr_density_thresholds(z_mcmc, dx, dy, hdr_masses)
+    ))
+
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.contour(xx, yy, z_rat, levels=6, linestyles="-")
-    ax.contour(xx, yy, z_mcmc, levels=6, linestyles="--")
-    ax.plot([], [], linestyle="-", label="RaT")
-    ax.plot([], [], linestyle="--", label="MCMC")
+    ax.contour(
+        xx, yy, z_rat, levels=rat_levels,
+        colors="tab:blue", linestyles="-", linewidths=1.4,
+    )
+    ax.contour(
+        xx, yy, z_mcmc, levels=mcmc_levels,
+        colors="tab:orange", linestyles="--", linewidths=1.4,
+    )
+    for values, color in ((Xr, "tab:blue"), (Xm, "tab:orange")):
+        count = min(int(scatter_n), values.shape[0])
+        index = rng.choice(values.shape[0], count, replace=False)
+        ax.scatter(
+            values[index, 0], values[index, 1],
+            s=8, alpha=0.13, color=color, edgecolors="none",
+        )
+    ax.plot([], [], color="tab:blue", linestyle="-", label=rat_label)
+    ax.plot([], [], color="tab:orange", linestyle="--", label=mcmc_label)
     ax.set_xlabel(rat["labels"][0])
     ax.set_ylabel(rat["labels"][1])
-    ax.set_title("True-active joint posterior density")
+    ax.set_title(title)
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(y_lo, y_hi)
+    mass_label = "/".join(f"{int(100 * value)}%" for value in hdr_masses)
+    skl_label = (
+        f"; joint SKL={joint_skl:.3f}"
+        if np.isfinite(joint_skl) else "; joint SKL=NA"
+    )
+    ax.text(
+        0.02, 0.02, f"HDR: {mass_label}{skl_label}", transform=ax.transAxes,
+        fontsize=8, alpha=0.75,
+    )
     ax.legend()
     fig.tight_layout()
     return fig, ax

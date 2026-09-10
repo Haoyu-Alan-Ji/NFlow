@@ -1,5 +1,6 @@
 import copy
 import random
+import time
 
 import numpy as np
 import pandas as pd
@@ -757,7 +758,10 @@ def train_grouped_bnn(
     selection_mode="unit_group",
     input_dim=None,
     H=5,
+    hidden_dims=None,
     out_dim=1,
+    architecture_mode="stacked",
+    embedding_dim=None,
     family="gaussian",
     sigma2=1.0,
     init_sd=None,
@@ -767,10 +771,20 @@ def train_grouped_bnn(
     flow_hidden_layers=2,
     scale_clip=1.5,
     flow_token_dim=32,
-    flow_num_heads=4,
+    flow_num_heads=2,
     flow_mask_seed=None,
+    conditioner_type=None,
+    coupling_type=None,
+    spline_num_bins=8,
+    spline_tail_bound=3.0,
+    spline_min_bin_width=1e-3,
+    spline_min_bin_height=1e-3,
+    spline_min_derivative=1e-3,
+    spline_inverse_tolerance=1e-4,
+    gate_type=None,
     gate_power=1.0,
     gate_tau=None,
+    gate_delta=1.0,
     repu_power=None,
     linear_skip=False,
     epochs=2500,
@@ -778,6 +792,7 @@ def train_grouped_bnn(
     R_train=64,
     R_eval=1000,
     R_final=5000,
+    sampling_timing_repeats=3,
     eval_every=250,
     selection_warmup_epochs=1000,
     init_loc_jitter=0.05,
@@ -785,6 +800,7 @@ def train_grouped_bnn(
     checkpoint_metric=None,
     grad_clip=5.0,
     min_active_draws=50,
+    recovery_eval_max_mcmc_draws=2000,
     zero_tol=1e-6,
     constant_tol=1e-6,
     seed=123,
@@ -797,14 +813,21 @@ def train_grouped_bnn(
     checkpoint_metric names a history column to maximize after warmup.
     """
 
-    if selection_mode not in {"unit_group", "feature_group"}:
-        raise ValueError("Use train_edge_bnn for selection_mode='edge'.")
+    if selection_mode not in {
+        "unit_group",
+        "feature_group",
+        "feature_unit_induced_edge",
+        "edge_group",
+    }:
+        raise ValueError("Unknown grouped selection_mode.")
     if endpoint not in {"last", "checkpoint"}:
         raise ValueError("endpoint must be 'last' or 'checkpoint'.")
     if endpoint == "checkpoint" and checkpoint_metric is None:
         raise ValueError("checkpoint_metric is required for endpoint='checkpoint'.")
     if not 0 <= int(selection_warmup_epochs) < int(epochs):
         raise ValueError("selection_warmup_epochs must be in [0, epochs).")
+    if int(sampling_timing_repeats) < 1:
+        raise ValueError("sampling_timing_repeats must be positive.")
 
     random.seed(seed)
     np.random.seed(seed)
@@ -826,14 +849,20 @@ def train_grouped_bnn(
         signal_final, device=device, dtype=dtype
     )
     mcmc_xi = torch.as_tensor(mcmc_xi, device=device, dtype=dtype)
+    mcmc_xi_eval = mcmc_xi[:min(
+        int(recovery_eval_max_mcmc_draws), mcmc_xi.shape[0]
+    )]
 
     model = GroupedBNNVI(
         X=X_train,
         y=y_train,
         input_dim=input_dim,
         H=H,
+        hidden_dims=hidden_dims,
         out_dim=out_dim,
         selection_mode=selection_mode,
+        architecture_mode=architecture_mode,
+        embedding_dim=embedding_dim,
         family=family,
         sigma2=sigma2,
         init_sd=init_sd,
@@ -845,8 +874,17 @@ def train_grouped_bnn(
         flow_token_dim=flow_token_dim,
         flow_num_heads=flow_num_heads,
         flow_mask_seed=flow_mask_seed,
+        conditioner_type=conditioner_type,
+        coupling_type=coupling_type,
+        spline_num_bins=spline_num_bins,
+        spline_tail_bound=spline_tail_bound,
+        spline_min_bin_width=spline_min_bin_width,
+        spline_min_bin_height=spline_min_bin_height,
+        spline_min_derivative=spline_min_derivative,
+        gate_type=gate_type,
         gate_power=gate_power,
         gate_tau=gate_tau,
+        gate_delta=gate_delta,
         repu_power=repu_power,
         linear_skip=linear_skip,
     ).to(device)
@@ -861,12 +899,27 @@ def train_grouped_bnn(
             )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    trainable_params = int(sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    ))
+    flow_trainable_params = int(sum(
+        parameter.numel()
+        for parameter in model.flow.parameters()
+        if parameter.requires_grad
+    ))
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
+    train_started = time.perf_counter()
     history = []
     group_history = []
     unit_history = []
     best_score = -np.inf
     best_epoch = None
     best_state = None
+    n_nonfinite_gradients = 0
 
     for epoch in range(1, int(epochs) + 1):
         model.train()
@@ -875,12 +928,9 @@ def train_grouped_bnn(
         selection_warmup = epoch <= int(selection_warmup_epochs)
         if selection_warmup:
             xi_train, log_q_train = model.sample_posterior(R_train)
-            xi_like = xi_train.clone()
-            u0 = model.decoder.s_dim
-            u1 = u0 + model.decoder.u_dim
-            t = xi_train[:, u1:u1 + model.decoder.t_dim]
-            xi_like[:, u0:u1] = t + 1.0
-            log_likelihood_train = model.log_likelihood(xi_like)
+            log_likelihood_train = model.log_likelihood(
+                xi_train, force_all_on=True
+            )
             log_prior_train = model.log_prior(xi_train)
             loss = -(
                 log_likelihood_train + log_prior_train - log_q_train
@@ -889,7 +939,20 @@ def train_grouped_bnn(
             train_terms = model.elbo_draws(R_train)
             loss = -train_terms["elbo"].mean()
 
+        if not bool(torch.isfinite(loss)):
+            raise FloatingPointError(
+                f"Non-finite training loss at epoch {epoch}."
+            )
         loss.backward()
+        gradients_finite = all(
+            parameter.grad is None or bool(torch.isfinite(parameter.grad).all())
+            for parameter in model.parameters()
+        )
+        if not gradients_finite:
+            n_nonfinite_gradients += 1
+            raise FloatingPointError(
+                f"Non-finite gradient detected at epoch {epoch}."
+            )
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
@@ -903,17 +966,13 @@ def train_grouped_bnn(
         model.eval()
         with torch.no_grad():
             xi_eval, log_q_eval = model.sample_posterior(R_eval)
-            xi_eval_like = xi_eval
-            if selection_warmup:
-                xi_eval_like = xi_eval.clone()
-                u0 = model.decoder.s_dim
-                u1 = u0 + model.decoder.u_dim
-                t = xi_eval[:, u1:u1 + model.decoder.t_dim]
-                xi_eval_like[:, u0:u1] = t + 1.0
-
-            log_likelihood = model.log_likelihood(xi_eval_like)
+            log_likelihood = model.log_likelihood(
+                xi_eval, force_all_on=selection_warmup
+            )
             log_prior = model.log_prior(xi_eval)
-            pred_eval = model.decoder(X_eval, xi_eval_like)
+            pred_eval = model.decoder(
+                X_eval, xi_eval, force_all_on=selection_warmup
+            )
 
         function = metric.function_recovery_metrics(
             signal=signal_eval,
@@ -926,15 +985,15 @@ def train_grouped_bnn(
             rat_decoder=model.decoder,
             rat_xi=xi_eval,
             mcmc_decoder=mcmc_decoder,
-            mcmc_xi=mcmc_xi,
+            mcmc_xi=mcmc_xi_eval,
             truth=truth,
             min_active_draws=min_active_draws,
         )
         groups = metric.group_posterior_summary(
-            model.decoder, xi_eval, method="RaT", epoch=epoch
+            model.decoder, xi_eval, method="VI", epoch=epoch
         )
         units = metric.unit_group_summary(
-            model.decoder, xi_eval, method="RaT", epoch=epoch
+            model.decoder, xi_eval, method="VI", epoch=epoch
         )
         row = {
             "epoch": epoch,
@@ -966,10 +1025,18 @@ def train_grouped_bnn(
         group_history.extend(groups.to_dict("records"))
         unit_history.extend(units.to_dict("records"))
 
-        selection_text = "" if selection_warmup else (
-            f" pipTruth={row['pip_rmse_truth']:.4f}"
-            f" activeSKL={row['true_active_skl']:.4f}"
-        )
+        if selection_warmup:
+            selection_text = ""
+        elif np.isfinite(row["pip_rmse_truth"]):
+            selection_text = (
+                f" pipTruth={row['pip_rmse_truth']:.4f}"
+                f" activeSKL={row['true_active_skl']:.4f}"
+            )
+        else:
+            selection_text = (
+                f" pipMCMC={row['pip_rmse_mcmc']:.4f}"
+                f" activeSKL={row['true_active_skl']:.4f}"
+            )
         marker = " *" if row["checkpoint_update"] else ""
         print(
             f"epoch={epoch:04d} "
@@ -978,6 +1045,10 @@ def train_grouped_bnn(
             f"{selection_text}"
             f"{marker}"
         )
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    train_time_sec = time.perf_counter() - train_started
 
     last_state = copy.deepcopy(model.state_dict())
     if endpoint == "checkpoint":
@@ -990,8 +1061,63 @@ def train_grouped_bnn(
         endpoint_epoch = int(epochs)
 
     model.eval()
+    sampling_times = []
+    xi_final = None
+    log_q_final = None
+    for repeat in range(int(sampling_timing_repeats)):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        sampling_started = time.perf_counter()
+        with torch.no_grad():
+            xi_sample, log_q_sample = model.sample_posterior(R_final)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        sampling_times.append(time.perf_counter() - sampling_started)
+        if repeat == 0:
+            xi_final, log_q_final = xi_sample, log_q_sample
+    posterior_sampling_time_sec = float(np.median(sampling_times))
+    posterior_sampling_time_iqr_sec = float(
+        np.quantile(sampling_times, 0.75)
+        - np.quantile(sampling_times, 0.25)
+    )
+
+    if not bool(torch.isfinite(xi_final).all()):
+        raise FloatingPointError("Posterior sampling produced NaN or Inf draws.")
+    if not bool(torch.isfinite(log_q_final).all()):
+        raise FloatingPointError("Posterior sampling produced non-finite log-q.")
+
+    flow_sanity = None
+    if hasattr(model.flow, "numerical_sanity_check"):
+        with torch.no_grad():
+            sanity_base = model.q0.sample(min(256, int(R_final)))
+            flow_sanity = model.flow.numerical_sanity_check(sanity_base)
+        flow_sanity["n_nonfinite_gradients"] = int(n_nonfinite_gradients)
+        if getattr(model.flow, "coupling_type", None) == "spline":
+            failures = (
+                flow_sanity["n_nonfinite_forward"] > 0
+                or flow_sanity["n_nonfinite_inverse"] > 0
+                or flow_sanity["n_nonfinite_logdet"] > 0
+                or flow_sanity["n_nonfinite_spline_parameters"] > 0
+                or flow_sanity["max_inverse_error"] > float(
+                    spline_inverse_tolerance
+                )
+                or flow_sanity["max_logdet_consistency_error"] > float(
+                    spline_inverse_tolerance
+                )
+                or flow_sanity["min_width"] + 1e-12
+                < float(spline_min_bin_width)
+                or flow_sanity["min_height"] + 1e-12
+                < float(spline_min_bin_height)
+                or flow_sanity["min_derivative"] + 1e-12
+                < float(spline_min_derivative)
+            )
+            if failures:
+                raise RuntimeError(
+                    "Spline numerical sanity check failed: "
+                    f"{flow_sanity}"
+                )
+
     with torch.no_grad():
-        xi_final, log_q_final = model.sample_posterior(R_final)
         final_log_likelihood = model.log_likelihood(xi_final)
         final_log_prior = model.log_prior(xi_final)
         val_pred = metric.predict_draws(model.decoder, X_eval, xi_final)
@@ -1044,6 +1170,38 @@ def train_grouped_bnn(
         "elbo": float(
             (final_log_likelihood + final_log_prior - log_q_final).mean()
         ),
+        "train_time_sec": float(train_time_sec),
+        "sec_per_epoch": float(train_time_sec / int(epochs)),
+        "posterior_sampling_time_sec": float(posterior_sampling_time_sec),
+        "posterior_sampling_time_iqr_sec": posterior_sampling_time_iqr_sec,
+        "posterior_sampling_timing_repeats": int(sampling_timing_repeats),
+        "trainable_params": trainable_params,
+        "flow_trainable_params": flow_trainable_params,
+        "gpu_peak_memory_bytes": (
+            int(torch.cuda.max_memory_allocated(device))
+            if device.type == "cuda" else None
+        ),
+        "max_inverse_error": (
+            None if flow_sanity is None else flow_sanity["max_inverse_error"]
+        ),
+        "max_logdet_consistency_error": (
+            None if flow_sanity is None
+            else flow_sanity["max_logdet_consistency_error"]
+        ),
+        "n_nonfinite_forward": (
+            None if flow_sanity is None else flow_sanity["n_nonfinite_forward"]
+        ),
+        "n_nonfinite_inverse": (
+            None if flow_sanity is None else flow_sanity["n_nonfinite_inverse"]
+        ),
+        "n_nonfinite_logdet": (
+            None if flow_sanity is None else flow_sanity["n_nonfinite_logdet"]
+        ),
+        "n_nonfinite_spline_parameters": (
+            None if flow_sanity is None
+            else flow_sanity["n_nonfinite_spline_parameters"]
+        ),
+        "n_nonfinite_gradients": int(n_nonfinite_gradients),
         **endpoint_function,
         **recovery,
         **rat_function,
@@ -1051,13 +1209,13 @@ def train_grouped_bnn(
     }
 
     rat_groups = metric.group_posterior_summary(
-        model.decoder, xi_final, method="RaT", epoch=endpoint_epoch
+        model.decoder, xi_final, method="VI", epoch=endpoint_epoch
     )
     mcmc_groups = metric.group_posterior_summary(
         mcmc_decoder, mcmc_xi, method="MCMC"
     )
     rat_units = metric.unit_group_summary(
-        model.decoder, xi_final, method="RaT", epoch=endpoint_epoch
+        model.decoder, xi_final, method="VI", epoch=endpoint_epoch
     )
     mcmc_units = metric.unit_group_summary(
         mcmc_decoder, mcmc_xi, method="MCMC"
@@ -1073,6 +1231,7 @@ def train_grouped_bnn(
             "xi": xi_final.detach(),
             "rat_prediction_draws": rat_pred,
             "mcmc_prediction_draws": mcmc_pred,
+            "flow_sanity": flow_sanity,
             "recovery_by_target": recovery_table,
             "group_metrics": pd.concat(
                 [rat_groups, mcmc_groups], ignore_index=True
@@ -1085,20 +1244,39 @@ def train_grouped_bnn(
             "selection_mode": selection_mode,
             "input_dim": model.decoder.input_dim,
             "H": int(model.decoder.H),
+            "hidden_dims": tuple(model.decoder.hidden_dims),
             "out_dim": int(out_dim),
+            "architecture_mode": model.decoder.architecture_mode,
+            "embedding_dim": model.decoder.embedding_dim,
+            "threshold_roles": tuple(model.decoder.threshold_roles),
+            "n_candidate_edges": int(model.decoder.n_candidate_edges),
             "linear_skip": bool(linear_skip),
             "flow_type": flow_type,
             "K_flow": int(K_flow),
             "flow_token_dim": int(flow_token_dim),
             "flow_num_heads": int(flow_num_heads),
             "flow_mask_seed": int(flow_mask_seed),
+            "flow_mask_strategy": getattr(
+                model.flow, "mask_strategy", "identity"
+            ),
+            "conditioner_type": model.conditioner_type,
+            "coupling_type": model.coupling_type,
+            "spline_num_bins": int(spline_num_bins),
+            "spline_tail_bound": float(spline_tail_bound),
+            "spline_min_bin_width": float(spline_min_bin_width),
+            "spline_min_bin_height": float(spline_min_bin_height),
+            "spline_min_derivative": float(spline_min_derivative),
+            "spline_inverse_tolerance": float(spline_inverse_tolerance),
             "repu_power": repu_power,
+            "gate_type": model.decoder.gate_type,
             "gate_power": float(gate_power),
             "gate_tau": gate_tau,
+            "gate_delta": float(gate_delta),
             "init_sd": model.q0.init_sd,
             "R_train": int(R_train),
             "R_eval": int(R_eval),
             "R_final": int(R_final),
+            "sampling_timing_repeats": int(sampling_timing_repeats),
             "eval_every": int(eval_every),
             "epochs": int(epochs),
             "selection_warmup_epochs": int(selection_warmup_epochs),
@@ -1106,6 +1284,9 @@ def train_grouped_bnn(
             "endpoint": endpoint,
             "checkpoint_metric": checkpoint_metric,
             "seed": int(seed),
+            "recovery_eval_max_mcmc_draws": int(
+                recovery_eval_max_mcmc_draws
+            ),
         },
     }
 
