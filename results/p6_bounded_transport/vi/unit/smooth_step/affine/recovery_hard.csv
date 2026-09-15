@@ -1,6 +1,0 @@
-target_type,target,label,truth_active,truth_pip,rat_pip,mcmc_pip,pip_error_truth,pip_error,conditional_slab_skl,zero_mass_js,n_rat_active_draws,n_mcmc_active_draws
-unit_rank,0,unit_rank_1,True,1.0,1.0,1.0,0.0,0.0,0.060358782453693756,,5000,20000
-unit_rank,1,unit_rank_2,True,1.0,0.9998,1.0,-0.00019999999999997797,-0.00019999999999997797,0.05799145386949811,,4999,20000
-unit_rank,2,unit_rank_3,False,0.0,0.1206,0.40315,0.1206,-0.28255,,0.05381549840742368,603,8063
-unit_rank,3,unit_rank_4,False,0.0,0.013,0.1022,0.013,-0.0892,,0.020681243241428733,65,2044
-unit_rank,4,unit_rank_5,False,0.0,0.0006,0.01615,0.0006,-0.015550000000000001,,0.004542259837845622,3,323

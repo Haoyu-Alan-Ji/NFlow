@@ -1,4 +1,7 @@
-import copy
+"""Training loop for the cleaned grouped DSS-LVR BNN."""
+
+from __future__ import annotations
+
 import random
 import time
 
@@ -6,742 +9,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from . import metric
-from .model2 import DirectUnitBNNVI, GroupedBNNVI, LaSTBNNVI, ROLE_NAMES
-
-
-def train_direct_bnn(
-    X_train,
-    y_train,
-    X_eval,
-    signal_eval,
-    *,
-    X_final=None,
-    signal_final=None,
-    mcmc_decoder,
-    mcmc_xi,
-    H=3,
-    family="gaussian",
-    sigma2=1.0,
-    gate_roles=ROLE_NAMES,
-    gate_power=2.0,
-    gate_tau=1.0,
-    init_sd=None,
-    K_flow=8,
-    flow_hidden_units=64,
-    flow_hidden_layers=2,
-    scale_clip=1.5,
-    epochs=6000,
-    lr=3e-4,
-    R_train=64,
-    R_eval=1000,
-    R_final=5000,
-    eval_every=250,
-    grad_clip=5.0,
-    epsilon_C=1e-6,
-    breakpoint_eps=1e-4,
-    zero_tol=1e-6,
-    constant_tol=1e-6,
-    reference_threshold=0.5,
-    min_active_draws=50,
-    seed=123,
-):
-    """Train direct-unit RaT and select by validation-grid signal R2."""
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    device = X_train.device
-    dtype = X_train.dtype
-    X_eval = torch.as_tensor(X_eval, device=device, dtype=dtype)
-    signal_eval = torch.as_tensor(
-        signal_eval,
-        device=device,
-        dtype=dtype,
-    )
-    X_final = X_eval if X_final is None else torch.as_tensor(
-        X_final,
-        device=device,
-        dtype=dtype,
-    )
-    signal_final = (
-        signal_eval
-        if signal_final is None
-        else torch.as_tensor(
-            signal_final,
-            device=device,
-            dtype=dtype,
-        )
-    )
-
-    model = DirectUnitBNNVI(
-        X=X_train,
-        y=y_train,
-        H=H,
-        family=family,
-        sigma2=sigma2,
-        gate_roles=gate_roles,
-        gate_power=gate_power,
-        gate_tau=gate_tau,
-        init_sd=init_sd,
-        K_flow=K_flow,
-        flow_hidden_units=flow_hidden_units,
-        flow_hidden_layers=flow_hidden_layers,
-        scale_clip=scale_clip,
-    ).to(device)
-
-    if mcmc_decoder is not None and (
-        mcmc_decoder.H != model.decoder.H
-        or mcmc_decoder.gate_roles != model.decoder.gate_roles
-        or mcmc_decoder.gate_power != model.decoder.gate_power
-        or mcmc_decoder.gate_tau != model.decoder.gate_tau
-    ):
-        raise ValueError("MCMC and RaT must use the same direct decoder.")
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    history = []
-    role_history = []
-    unit_history = []
-    contribution_history = []
-    best_r2 = -np.inf
-    best_epoch = None
-    best_state = None
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        train_terms = model.elbo_draws(R_train)
-        train_terms["xi"].retain_grad()
-        loss = -train_terms["elbo"].mean()
-        loss.backward()
-
-        checkpoint = epoch == 1 or epoch % eval_every == 0
-        latent_grad = (
-            train_terms["xi"].grad.detach().clone() * R_train
-            if checkpoint else None
-        )
-        base_loc_grad = (
-            model.q0.loc.grad.detach().clone()
-            if checkpoint else None
-        )
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
-
-        if not checkpoint:
-            continue
-
-        model.eval()
-
-        with torch.no_grad():
-            xi_eval, log_q_eval = model.sample_posterior(R_eval)
-            log_likelihood = model.log_likelihood(xi_eval)
-            log_prior = model.log_prior(xi_eval)
-            pred_eval = model.decoder(X_eval, xi_eval)
-            continuous = model.decoder.unpack(xi_eval)
-
-        function = metric.function_recovery_metrics(
-            signal=signal_eval,
-            pred_draws=pred_eval,
-            prefix="val",
-            zero_tol=zero_tol,
-            constant_tol=constant_tol,
-        )
-        roles = metric.role_diagnostics(
-            decoder=model.decoder,
-            xi=xi_eval,
-            latent_grad=latent_grad,
-            base_loc_grad=base_loc_grad,
-            epoch=epoch,
-        )
-        units = metric.unit_path_diagnostics(
-            decoder=model.decoder,
-            xi=xi_eval,
-            epoch=epoch,
-            breakpoint_eps=breakpoint_eps,
-        )
-        contributions, cancellation = metric.contribution_diagnostics(
-            decoder=model.decoder,
-            X_grid=X_eval,
-            xi=xi_eval,
-            epoch=epoch,
-            epsilon_C=epsilon_C,
-            breakpoint_eps=breakpoint_eps,
-        )
-
-        row = {
-            "epoch": epoch,
-            "loss": float(loss.detach()),
-            "expected_log_likelihood": float(log_likelihood.mean()),
-            "expected_log_prior": float(log_prior.mean()),
-            "expected_log_q": float(log_q_eval.mean()),
-            "kl_q_prior": float((log_q_eval - log_prior).mean()),
-            "elbo": float(
-                (log_likelihood + log_prior - log_q_eval).mean()
-            ),
-            "expected_path_count": float(
-                units["path_probability"].sum()
-            ),
-            "beta0_abs_mean": float(
-                continuous["beta0"].abs().mean()
-            ),
-            "beta0_abs_median": float(
-                continuous["beta0"].abs().median()
-            ),
-            "ell_abs_mean": float(continuous["ell"].abs().mean()),
-            "ell_abs_median": float(
-                continuous["ell"].abs().median()
-            ),
-            "grad_beta0_norm": float(
-                latent_grad[:, 0].abs().mean()
-            ),
-            "grad_ell_norm": float(
-                latent_grad[:, 1].abs().mean()
-            ),
-            **function,
-            **{
-                name: value
-                for name, value in cancellation.items()
-                if name != "epoch"
-            },
-        }
-
-        history.append(row)
-        role_history.extend(roles.to_dict("records"))
-        unit_history.extend(units.to_dict("records"))
-        contribution_history.extend(contributions.to_dict("records"))
-
-        if row["val_signal_r2"] > best_r2:
-            best_r2 = row["val_signal_r2"]
-            best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
-
-        print(
-            f"epoch={epoch:04d} "
-            f"elbo={row['elbo']:.3f} "
-            f"valR2={row['val_signal_r2']:.4f} "
-            f"pathN={row['expected_path_count']:.3f} "
-            f"cancel={row['cancellation_ratio_median']:.3f}"
-        )
-
-    model.load_state_dict(best_state)
-    model.eval()
-
-    with torch.no_grad():
-        xi_final, log_q_final = model.sample_posterior(R_final)
-        final_log_likelihood = model.log_likelihood(xi_final)
-        final_log_prior = model.log_prior(xi_final)
-        final_pred = model.decoder(X_final, xi_final)
-        final_continuous = model.decoder.unpack(xi_final)
-
-    final_function = metric.function_recovery_metrics(
-        signal=signal_final,
-        pred_draws=final_pred,
-        prefix="rat",
-        zero_tol=zero_tol,
-        constant_tol=constant_tol,
-    )
-    final_role = metric.role_diagnostics(
-        decoder=model.decoder,
-        xi=xi_final,
-        epoch=best_epoch,
-    )
-    final_unit = metric.unit_path_diagnostics(
-        decoder=model.decoder,
-        xi=xi_final,
-        epoch=best_epoch,
-        breakpoint_eps=breakpoint_eps,
-    )
-    final_contribution, final_cancellation = (
-        metric.contribution_diagnostics(
-            decoder=model.decoder,
-            X_grid=X_eval,
-            xi=xi_final,
-            epoch=best_epoch,
-            epsilon_C=epsilon_C,
-            breakpoint_eps=breakpoint_eps,
-        )
-    )
-
-    final_summary = {
-        "best_epoch": best_epoch,
-        "best_val_signal_r2": best_r2,
-        "expected_log_likelihood": float(final_log_likelihood.mean()),
-        "expected_log_prior": float(final_log_prior.mean()),
-        "expected_log_q": float(log_q_final.mean()),
-        "kl_q_prior": float((log_q_final - final_log_prior).mean()),
-        "elbo": float(
-            (
-                final_log_likelihood
-                + final_log_prior
-                - log_q_final
-            ).mean()
-        ),
-        "beta0_abs_mean": float(
-            final_continuous["beta0"].abs().mean()
-        ),
-        "beta0_abs_median": float(
-            final_continuous["beta0"].abs().median()
-        ),
-        "ell_abs_mean": float(final_continuous["ell"].abs().mean()),
-        "ell_abs_median": float(
-            final_continuous["ell"].abs().median()
-        ),
-        **final_function,
-        **{
-            name: value
-            for name, value in final_cancellation.items()
-            if name != "epoch"
-        },
-    }
-
-    final = {
-        "summary": final_summary,
-        "xi": xi_final.detach(),
-        "prediction_draws": final_pred.detach().cpu(),
-        "role_metrics": final_role,
-        "unit_metrics": final_unit,
-        "contribution_metrics": final_contribution,
-        "cancellation_metrics": final_cancellation,
-    }
-
-    if mcmc_decoder is not None and mcmc_xi is not None:
-        mcmc_xi = torch.as_tensor(
-            mcmc_xi,
-            device=device,
-            dtype=dtype,
-        )
-        mcmc_pred = metric.predict_draws(
-            mcmc_decoder,
-            X_final,
-            mcmc_xi,
-        )
-        mcmc_function = metric.function_recovery_metrics(
-            signal=signal_final,
-            pred_draws=mcmc_pred,
-            prefix="mcmc",
-            zero_tol=zero_tol,
-            constant_tol=constant_tol,
-        )
-        spike_summary, spike_table = metric.spike_slab_metrics(
-            rat_decoder=model.decoder,
-            rat_xi=xi_final,
-            mcmc_decoder=mcmc_decoder,
-            mcmc_xi=mcmc_xi,
-            reference_threshold=reference_threshold,
-            min_active_draws=min_active_draws,
-            breakpoint_eps=breakpoint_eps,
-        )
-        mcmc_contribution, mcmc_cancellation = (
-            metric.contribution_diagnostics(
-                decoder=mcmc_decoder,
-                X_grid=X_eval,
-                xi=mcmc_xi,
-                epsilon_C=epsilon_C,
-                breakpoint_eps=breakpoint_eps,
-            )
-        )
-
-        final_summary.update(mcmc_function)
-        final_summary.update(spike_summary)
-        final_summary.update({
-            f"mcmc_{name}": value
-            for name, value in mcmc_cancellation.items()
-            if name != "epoch"
-        })
-        final.update({
-            "mcmc_prediction_draws": mcmc_pred,
-            "mcmc_role_metrics": metric.role_diagnostics(
-                mcmc_decoder,
-                mcmc_xi,
-            ),
-            "mcmc_unit_metrics": metric.unit_path_diagnostics(
-                mcmc_decoder,
-                mcmc_xi,
-                breakpoint_eps=breakpoint_eps,
-            ),
-            "mcmc_contribution_metrics": mcmc_contribution,
-            "mcmc_cancellation_metrics": mcmc_cancellation,
-            "spike_slab_metrics": spike_table,
-        })
-
-    return {
-        "model": model,
-        "history": pd.DataFrame(history),
-        "role_history": pd.DataFrame(role_history),
-        "unit_history": pd.DataFrame(unit_history),
-        "contribution_history": pd.DataFrame(contribution_history),
-        "final": final,
-        "config": {
-            "H": int(H),
-            "family": family,
-            "sigma2": float(sigma2),
-            "gate_roles": tuple(gate_roles),
-            "init_sd": model.q0.init_sd,
-            "gate_power": float(gate_power),
-            "gate_tau": gate_tau,
-            "K_flow": int(K_flow),
-            "R_train": int(R_train),
-            "R_eval": int(R_eval),
-            "R_final": int(R_final),
-            "eval_every": int(eval_every),
-            "epochs": int(epochs),
-            "seed": int(seed),
-        },
-    }
-
-
-def train_edge_bnn(
-    X_train,
-    y_train,
-    X_eval,
-    signal_eval,
-    *,
-    X_final=None,
-    signal_final=None,
-    mcmc_decoder,
-    mcmc_xi,
-    input_dim=None,
-    d_model=2,
-    n_blocks=1,
-    ffn_dims=3,
-    out_dim=1,
-    family="gaussian",
-    sigma2=1.0,
-    init_sd=None,
-    K_flow=8,
-    flow_type="semantic",
-    flow_hidden_units=64,
-    flow_hidden_layers=2,
-    scale_clip=1.5,
-    flow_token_dim=32,
-    flow_num_heads=4,
-    bounded=None,
-    gate_power=2.0,
-    gate_tau=1.0,
-    sigmoid_params=("E", "Wout"),
-    sigmoid_tau=1.0,
-    attention_type="none",
-    ffn_activation="relu",
-    epochs=6000,
-    lr=3e-4,
-    R_train=64,
-    R_eval=1000,
-    R_final=5000,
-    eval_every=250,
-    grad_clip=5.0,
-    active_threshold=0.5,
-    sigmoid_active_threshold=0.5,
-    sigmoid_zero_threshold=0.05,
-    eps_w=0.05,
-    eps_a=0.05,
-    eps_l=0.05,
-    eps_c=1e-4,
-    seed=123,
-):
-    """Train the one-block edge model and select by validation signal R2."""
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    device = X_train.device
-    dtype = X_train.dtype
-    X_eval = torch.as_tensor(X_eval, device=device, dtype=dtype)
-    signal_eval = torch.as_tensor(
-        signal_eval,
-        device=device,
-        dtype=dtype,
-    )
-    X_final = X_eval if X_final is None else torch.as_tensor(
-        X_final,
-        device=device,
-        dtype=dtype,
-    )
-    signal_final = (
-        signal_eval
-        if signal_final is None
-        else torch.as_tensor(
-            signal_final,
-            device=device,
-            dtype=dtype,
-        )
-    )
-
-    model = LaSTBNNVI(
-        X=X_train,
-        y=y_train,
-        input_dim=input_dim,
-        d_model=d_model,
-        n_blocks=n_blocks,
-        ffn_dims=ffn_dims,
-        out_dim=out_dim,
-        family=family,
-        sigma2=sigma2,
-        init_sd=init_sd,
-        K_flow=K_flow,
-        flow_type=flow_type,
-        flow_hidden_units=flow_hidden_units,
-        flow_hidden_layers=flow_hidden_layers,
-        scale_clip=scale_clip,
-        flow_token_dim=flow_token_dim,
-        flow_num_heads=flow_num_heads,
-        bounded=bounded,
-        gate_power=gate_power,
-        gate_tau=gate_tau,
-        sigmoid_params=sigmoid_params,
-        sigmoid_tau=sigmoid_tau,
-        attention_type=attention_type,
-        ffn_activation=ffn_activation,
-    ).to(device)
-
-    if mcmc_decoder is not None:
-        mcmc_specs = [
-            (item["name"], tuple(item["shape"]))
-            for item in mcmc_decoder.param_specs
-        ]
-        rat_specs = [
-            (item["name"], tuple(item["shape"]))
-            for item in model.decoder.param_specs
-        ]
-
-        if (
-            mcmc_specs != rat_specs
-            or mcmc_decoder.sigmoid_params
-            != model.decoder.sigmoid_params
-            or mcmc_decoder.sigmoid_tau != model.decoder.sigmoid_tau
-            or mcmc_decoder.gate_power != model.decoder.gate_power
-            or mcmc_decoder.gate_tau != model.decoder.gate_tau
-        ):
-            raise ValueError("MCMC and RaT must use the same edge decoder.")
-
-    mcmc_xi = torch.as_tensor(
-        mcmc_xi,
-        device=device,
-        dtype=dtype,
-    )
-    mcmc_post = metric.posterior_draws(
-        mcmc_decoder,
-        mcmc_xi,
-        sigmoid_active_threshold=sigmoid_active_threshold,
-    )
-    mcmc_pred_eval = metric.predict_draws(
-        mcmc_decoder,
-        X_eval,
-        mcmc_xi,
-    )
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    history = []
-    layer_history = []
-    path_history = []
-    best_r2 = -np.inf
-    best_epoch = None
-    best_state = None
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        train_terms = model.elbo_draws(R_train)
-        loss = -train_terms["elbo"].mean()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
-
-        if epoch != 1 and epoch % eval_every != 0:
-            continue
-
-        model.eval()
-
-        with torch.no_grad():
-            xi_eval, log_q_eval = model.sample_posterior(R_eval)
-            log_likelihood = model.log_likelihood(xi_eval)
-            log_prior = model.log_prior(xi_eval)
-
-        rat_post = metric.posterior_draws(
-            model.decoder,
-            xi_eval,
-            sigmoid_active_threshold=sigmoid_active_threshold,
-        )
-        recovery, layers = metric.posterior_metrics(
-            last=rat_post,
-            mcmc=mcmc_post,
-            active_threshold=active_threshold,
-        )
-        rat_pred_eval = metric.predict_draws(
-            model.decoder,
-            X_eval,
-            xi_eval,
-        )
-        function = metric.function_metrics(
-            signal=signal_eval,
-            mcmc_pred_draws=mcmc_pred_eval,
-            last_pred_draws=rat_pred_eval,
-        )
-        paths = metric.residual_path_metrics(
-            decoder=model.decoder,
-            xi=xi_eval,
-            x_grid=X_eval,
-            method="RaT",
-            eps_w=eps_w,
-            eps_a=eps_a,
-            eps_l=eps_l,
-            eps_c=eps_c,
-            sigmoid_zero_threshold=sigmoid_zero_threshold,
-        )
-        path_summary = paths["summary"].iloc[0].to_dict()
-        hidden = layers["parameter"].str.match(r"W1_|b1_|W2_|b2_")
-
-        row = {
-            "epoch": epoch,
-            "loss": float(loss.detach()),
-            "expected_log_likelihood": float(log_likelihood.mean()),
-            "expected_log_prior": float(log_prior.mean()),
-            "expected_log_q": float(log_q_eval.mean()),
-            "kl_q_prior": float((log_q_eval - log_prior).mean()),
-            "elbo": float(
-                (log_likelihood + log_prior - log_q_eval).mean()
-            ),
-            "hidden_a_skl": float(
-                np.nanmedian(layers.loc[hidden, "a_skl"])
-            ),
-            "hidden_pip_rmse": float(
-                np.sqrt(np.nanmean(layers.loc[hidden, "pip_rmse"] ** 2))
-            ),
-            **recovery,
-            **function,
-            **{
-                name: value
-                for name, value in path_summary.items()
-                if name != "method"
-            },
-        }
-
-        history.append(row)
-        layer_history.extend(
-            layers.assign(epoch=epoch).to_dict("records")
-        )
-        path_history.extend(
-            paths["units"].assign(epoch=epoch).to_dict("records")
-        )
-
-        if row["last_signal_r2"] > best_r2:
-            best_r2 = row["last_signal_r2"]
-            best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
-
-        print(
-            f"epoch={epoch:04d} "
-            f"valR2={row['last_signal_r2']:.4f} "
-            f"hiddenSKL={row['hidden_a_skl']:.4f} "
-            f"pathN={row['expected_functional_paths']:.3f} "
-            f"zeroPath={row['zero_functional_path_prob']:.3f}"
-        )
-
-    model.load_state_dict(best_state)
-    model.eval()
-
-    with torch.no_grad():
-        xi_final, _ = model.sample_posterior(R_final)
-
-    bundle = metric.bnn_metrics(
-        mcmc_decoder=mcmc_decoder,
-        last_decoder=model.decoder,
-        mcmc_xi=mcmc_xi,
-        last_xi=xi_final,
-        X=X_final,
-        signal=signal_final,
-        active_threshold=active_threshold,
-        sigmoid_active_threshold=sigmoid_active_threshold,
-    )
-    rat_paths = metric.residual_path_metrics(
-        decoder=model.decoder,
-        xi=xi_final,
-        x_grid=X_eval,
-        method="RaT",
-        eps_w=eps_w,
-        eps_a=eps_a,
-        eps_l=eps_l,
-        eps_c=eps_c,
-        sigmoid_zero_threshold=sigmoid_zero_threshold,
-    )
-    mcmc_paths = metric.residual_path_metrics(
-        decoder=mcmc_decoder,
-        xi=mcmc_xi,
-        x_grid=X_eval,
-        method="MCMC",
-        eps_w=eps_w,
-        eps_a=eps_a,
-        eps_l=eps_l,
-        eps_c=eps_c,
-        sigmoid_zero_threshold=sigmoid_zero_threshold,
-    )
-    rat_path_summary = rat_paths["summary"].iloc[0].to_dict()
-    mcmc_path_summary = mcmc_paths["summary"].iloc[0].to_dict()
-    summary = {
-        "best_epoch": best_epoch,
-        "best_val_signal_r2": best_r2,
-        **bundle["summary"],
-        **{
-            name: value
-            for name, value in rat_path_summary.items()
-            if name != "method"
-        },
-        **{
-            f"mcmc_{name}": value
-            for name, value in mcmc_path_summary.items()
-            if name != "method"
-        },
-    }
-
-    return {
-        "model": model,
-        "history": pd.DataFrame(history),
-        "layer_history": pd.DataFrame(layer_history),
-        "path_history": pd.DataFrame(path_history),
-        "final": {
-            "summary": summary,
-            "xi": xi_final.detach(),
-            "posterior_by_layer": bundle["posterior_by_layer"],
-            "connection_counts": bundle["connection_counts"],
-            "hidden_units": bundle["hidden_units"],
-            "mcmc_prediction_draws": bundle["mcmc_pred_draws"],
-            "rat_prediction_draws": bundle["last_pred_draws"],
-            "path_summary": pd.concat(
-                [rat_paths["summary"], mcmc_paths["summary"]],
-                ignore_index=True,
-            ),
-            "path_units": pd.concat(
-                [rat_paths["units"], mcmc_paths["units"]],
-                ignore_index=True,
-            ),
-        },
-        "config": {
-            "input_dim": model.decoder.input_dim,
-            "d_model": int(d_model),
-            "n_blocks": int(n_blocks),
-            "ffn_dims": ffn_dims,
-            "sigmoid_params": tuple(sigmoid_params),
-            "sigmoid_tau": float(sigmoid_tau),
-            "sigmoid_zero_threshold": float(sigmoid_zero_threshold),
-            "init_sd": model.q0.init_sd,
-            "K_flow": int(K_flow),
-            "flow_type": flow_type,
-            "R_train": int(R_train),
-            "R_eval": int(R_eval),
-            "R_final": int(R_final),
-            "eval_every": int(eval_every),
-            "epochs": int(epochs),
-            "seed": int(seed),
-        },
-    }
+from . import bnn_metric
+from .model2 import GroupedBNNVI
 
 
 def train_grouped_bnn(
@@ -750,82 +19,54 @@ def train_grouped_bnn(
     X_eval,
     signal_eval,
     *,
-    mcmc_decoder,
-    mcmc_xi,
     truth,
     X_final=None,
     signal_final=None,
-    selection_mode="unit_group",
+    reference_decoder=None,
+    reference_xi=None,
+    selection_mode="feature_group",
     input_dim=None,
-    H=5,
-    hidden_dims=None,
+    hidden_dims=(5,),
     out_dim=1,
-    architecture_mode="stacked",
-    embedding_dim=None,
     family="gaussian",
     sigma2=1.0,
-    init_sd=None,
-    K_flow=8,
-    flow_type="attention_affine",
-    flow_hidden_units=64,
+    init_sd=0.5,
+    K_flow=4,
+    flow_type="attention",
+    flow_hidden_units=128,
     flow_hidden_layers=2,
-    scale_clip=1.5,
+    scale_clip=2.0,
     flow_token_dim=32,
-    flow_num_heads=2,
-    flow_mask_seed=None,
-    conditioner_type=None,
-    coupling_type=None,
-    spline_num_bins=8,
-    spline_tail_bound=3.0,
-    spline_min_bin_width=1e-3,
-    spline_min_bin_height=1e-3,
-    spline_min_derivative=1e-3,
-    spline_inverse_tolerance=1e-4,
-    gate_type=None,
-    gate_power=1.0,
-    gate_tau=None,
-    gate_delta=1.0,
-    repu_power=None,
-    linear_skip=False,
-    epochs=2500,
+    flow_num_heads=4,
+    flow_seed=None,
+    gate_scale=1.0,
+    epochs=2000,
+    warmup_epochs=500,
     lr=3e-4,
-    R_train=64,
+    R_train=100,
     R_eval=1000,
     R_final=5000,
-    sampling_timing_repeats=3,
     eval_every=250,
-    selection_warmup_epochs=1000,
+    sampling_timing_repeats=3,
     init_loc_jitter=0.05,
-    endpoint="last",
-    checkpoint_metric=None,
     grad_clip=5.0,
+    support_threshold=0.5,
     min_active_draws=50,
-    recovery_eval_max_mcmc_draws=2000,
-    zero_tol=1e-6,
-    constant_tol=1e-6,
     seed=123,
 ):
-    """
-    Train the grouped BNN and return one posterior endpoint.
+    """Train one grouped BNN and compute only final paper-level metrics.
 
-    During selection warmup, the likelihood sees every group gate fixed at 1;
-    log_q and log_prior still use the unmodified posterior draw. If requested,
-    checkpoint_metric names a history column to maximize after warmup.
+    MCMC is optional.  When a reference is supplied, Active SKL and Zero JS
+    are added to the final summary; otherwise the same function serves the MLP
+    experiments without any MCMC dependency.
     """
 
     if selection_mode not in {
-        "unit_group",
-        "feature_group",
-        "feature_unit_induced_edge",
-        "edge_group",
+        "feature_group", "unit_group", "feature_unit_induced_edge"
     }:
-        raise ValueError("Unknown grouped selection_mode.")
-    if endpoint not in {"last", "checkpoint"}:
-        raise ValueError("endpoint must be 'last' or 'checkpoint'.")
-    if endpoint == "checkpoint" and checkpoint_metric is None:
-        raise ValueError("checkpoint_metric is required for endpoint='checkpoint'.")
-    if not 0 <= int(selection_warmup_epochs) < int(epochs):
-        raise ValueError("selection_warmup_epochs must be in [0, epochs).")
+        raise ValueError("Unsupported selection_mode.")
+    if not 0 <= int(warmup_epochs) < int(epochs):
+        raise ValueError("warmup_epochs must be in [0, epochs).")
     if int(sampling_timing_repeats) < 1:
         raise ValueError("sampling_timing_repeats must be positive.")
 
@@ -834,9 +75,8 @@ def train_grouped_bnn(
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-    if flow_mask_seed is None:
-        flow_mask_seed = int(seed)
+    if flow_seed is None:
+        flow_seed = int(seed)
 
     device = X_train.device
     dtype = X_train.dtype
@@ -848,21 +88,19 @@ def train_grouped_bnn(
     signal_final = signal_eval if signal_final is None else torch.as_tensor(
         signal_final, device=device, dtype=dtype
     )
-    mcmc_xi = torch.as_tensor(mcmc_xi, device=device, dtype=dtype)
-    mcmc_xi_eval = mcmc_xi[:min(
-        int(recovery_eval_max_mcmc_draws), mcmc_xi.shape[0]
-    )]
+
+    if reference_xi is not None:
+        reference_xi = torch.as_tensor(reference_xi, device=device, dtype=dtype)
+    if (reference_decoder is None) != (reference_xi is None):
+        raise ValueError("reference_decoder and reference_xi must be supplied together.")
 
     model = GroupedBNNVI(
         X=X_train,
         y=y_train,
         input_dim=input_dim,
-        H=H,
         hidden_dims=hidden_dims,
         out_dim=out_dim,
         selection_mode=selection_mode,
-        architecture_mode=architecture_mode,
-        embedding_dim=embedding_dim,
         family=family,
         sigma2=sigma2,
         init_sd=init_sd,
@@ -873,24 +111,15 @@ def train_grouped_bnn(
         scale_clip=scale_clip,
         flow_token_dim=flow_token_dim,
         flow_num_heads=flow_num_heads,
-        flow_mask_seed=flow_mask_seed,
-        conditioner_type=conditioner_type,
-        coupling_type=coupling_type,
-        spline_num_bins=spline_num_bins,
-        spline_tail_bound=spline_tail_bound,
-        spline_min_bin_width=spline_min_bin_width,
-        spline_min_bin_height=spline_min_bin_height,
-        spline_min_derivative=spline_min_derivative,
-        gate_type=gate_type,
-        gate_power=gate_power,
-        gate_tau=gate_tau,
-        gate_delta=gate_delta,
-        repu_power=repu_power,
-        linear_skip=linear_skip,
+        flow_seed=flow_seed,
+        gate_scale=gate_scale,
     ).to(device)
 
-    if model.decoder.compatibility_signature() != mcmc_decoder.compatibility_signature():
-        raise ValueError("MCMC and VI must use exactly the same grouped decoder.")
+    if reference_decoder is not None and (
+        model.decoder.compatibility_signature()
+        != reference_decoder.compatibility_signature()
+    ):
+        raise ValueError("MCMC and VI decoders must be exactly matched.")
 
     if float(init_loc_jitter) > 0:
         with torch.no_grad():
@@ -898,7 +127,7 @@ def train_grouped_bnn(
                 float(init_loc_jitter) * torch.randn_like(model.q0.loc)
             )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
     trainable_params = int(sum(
         parameter.numel()
         for parameter in model.parameters()
@@ -909,156 +138,68 @@ def train_grouped_bnn(
         for parameter in model.flow.parameters()
         if parameter.requires_grad
     ))
+
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
-    train_started = time.perf_counter()
+    started = time.perf_counter()
     history = []
-    group_history = []
-    unit_history = []
-    best_score = -np.inf
-    best_epoch = None
-    best_state = None
-    n_nonfinite_gradients = 0
 
     for epoch in range(1, int(epochs) + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
+        warmup = epoch <= int(warmup_epochs)
 
-        selection_warmup = epoch <= int(selection_warmup_epochs)
-        if selection_warmup:
-            xi_train, log_q_train = model.sample_posterior(R_train)
-            log_likelihood_train = model.log_likelihood(
-                xi_train, force_all_on=True
-            )
-            log_prior_train = model.log_prior(xi_train)
-            loss = -(
-                log_likelihood_train + log_prior_train - log_q_train
-            ).mean()
+        if warmup:
+            xi_train, log_q = model.sample_posterior(R_train)
+            log_likelihood = model.log_likelihood(xi_train, force_all_on=True)
+            log_prior = model.log_prior(xi_train)
+            elbo = log_likelihood + log_prior - log_q
         else:
-            train_terms = model.elbo_draws(R_train)
-            loss = -train_terms["elbo"].mean()
-
+            terms = model.elbo_draws(R_train)
+            elbo = terms["elbo"]
+        loss = -elbo.mean()
         if not bool(torch.isfinite(loss)):
-            raise FloatingPointError(
-                f"Non-finite training loss at epoch {epoch}."
-            )
+            raise FloatingPointError(f"Non-finite loss at epoch {epoch}.")
+
         loss.backward()
-        gradients_finite = all(
-            parameter.grad is None or bool(torch.isfinite(parameter.grad).all())
-            for parameter in model.parameters()
-        )
-        if not gradients_finite:
-            n_nonfinite_gradients += 1
-            raise FloatingPointError(
-                f"Non-finite gradient detected at epoch {epoch}."
-            )
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        if not all(
+            p.grad is None or bool(torch.isfinite(p.grad).all())
+            for p in model.parameters()
+        ):
+            raise FloatingPointError(f"Non-finite gradient at epoch {epoch}.")
+        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
         optimizer.step()
 
         if (
-            epoch != 1
-            and epoch % int(eval_every) != 0
-            and epoch != int(epochs)
+            epoch == 1
+            or epoch % int(eval_every) == 0
+            or epoch == int(epochs)
         ):
-            continue
-
-        model.eval()
-        with torch.no_grad():
-            xi_eval, log_q_eval = model.sample_posterior(R_eval)
-            log_likelihood = model.log_likelihood(
-                xi_eval, force_all_on=selection_warmup
+            model.eval()
+            with torch.no_grad():
+                xi_eval, _ = model.sample_posterior(R_eval)
+                pred_eval = model.decoder(
+                    X_eval, xi_eval, force_all_on=warmup
+                )
+            function = bnn_metric.function_metrics(signal_eval, pred_eval)
+            row = {
+                "epoch": int(epoch),
+                "phase": "repr" if warmup else "select",
+                "loss": float(loss.detach()),
+                "elbo": float(elbo.mean().detach()),
+                "val_mse": function["mse"],
+                "val_r2": function["r2"],
+            }
+            history.append(row)
+            print(
+                f"epoch={epoch:04d} phase={row['phase']:6s} "
+                f"valMSE={row['val_mse']:.5f} valR2={row['val_r2']:.4f}"
             )
-            log_prior = model.log_prior(xi_eval)
-            pred_eval = model.decoder(
-                X_eval, xi_eval, force_all_on=selection_warmup
-            )
-
-        function = metric.function_recovery_metrics(
-            signal=signal_eval,
-            pred_draws=pred_eval,
-            prefix="val",
-            zero_tol=zero_tol,
-            constant_tol=constant_tol,
-        )
-        recovery, _ = metric.grouped_recovery_metrics(
-            rat_decoder=model.decoder,
-            rat_xi=xi_eval,
-            mcmc_decoder=mcmc_decoder,
-            mcmc_xi=mcmc_xi_eval,
-            truth=truth,
-            min_active_draws=min_active_draws,
-        )
-        groups = metric.group_posterior_summary(
-            model.decoder, xi_eval, method="VI", epoch=epoch
-        )
-        units = metric.unit_group_summary(
-            model.decoder, xi_eval, method="VI", epoch=epoch
-        )
-        row = {
-            "epoch": epoch,
-            "phase": "repr" if selection_warmup else "select",
-            "selection_warmup": selection_warmup,
-            "eligible_checkpoint": (
-                checkpoint_metric is not None and not selection_warmup
-            ),
-            "checkpoint_update": False,
-            "loss": float(loss.detach()),
-            "expected_log_likelihood": float(log_likelihood.mean()),
-            "expected_log_prior": float(log_prior.mean()),
-            "expected_log_q": float(log_q_eval.mean()),
-            "kl_q_prior": float((log_q_eval - log_prior).mean()),
-            "elbo": float((log_likelihood + log_prior - log_q_eval).mean()),
-            **function,
-            **recovery,
-        }
-
-        if row["eligible_checkpoint"]:
-            score = float(row[checkpoint_metric])
-            if np.isfinite(score) and score > best_score:
-                best_score = score
-                best_epoch = epoch
-                best_state = copy.deepcopy(model.state_dict())
-                row["checkpoint_update"] = True
-
-        history.append(row)
-        group_history.extend(groups.to_dict("records"))
-        unit_history.extend(units.to_dict("records"))
-
-        if selection_warmup:
-            selection_text = ""
-        elif np.isfinite(row["pip_rmse_truth"]):
-            selection_text = (
-                f" pipTruth={row['pip_rmse_truth']:.4f}"
-                f" activeSKL={row['true_active_skl']:.4f}"
-            )
-        else:
-            selection_text = (
-                f" pipMCMC={row['pip_rmse_mcmc']:.4f}"
-                f" activeSKL={row['true_active_skl']:.4f}"
-            )
-        marker = " *" if row["checkpoint_update"] else ""
-        print(
-            f"epoch={epoch:04d} "
-            f"phase={row['phase']:6s} "
-            f"valR2={row['val_signal_r2']:.4f}"
-            f"{selection_text}"
-            f"{marker}"
-        )
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    train_time_sec = time.perf_counter() - train_started
-
-    last_state = copy.deepcopy(model.state_dict())
-    if endpoint == "checkpoint":
-        if best_state is None:
-            raise RuntimeError("No post-warmup checkpoint was produced.")
-        model.load_state_dict(best_state)
-        endpoint_epoch = best_epoch
-    else:
-        model.load_state_dict(last_state)
-        endpoint_epoch = int(epochs)
+    train_time_sec = time.perf_counter() - started
 
     model.eval()
     sampling_times = []
@@ -1067,237 +208,98 @@ def train_grouped_bnn(
     for repeat in range(int(sampling_timing_repeats)):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        sampling_started = time.perf_counter()
+        sample_started = time.perf_counter()
         with torch.no_grad():
             xi_sample, log_q_sample = model.sample_posterior(R_final)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        sampling_times.append(time.perf_counter() - sampling_started)
+        sampling_times.append(time.perf_counter() - sample_started)
         if repeat == 0:
-            xi_final, log_q_final = xi_sample, log_q_sample
-    posterior_sampling_time_sec = float(np.median(sampling_times))
-    posterior_sampling_time_iqr_sec = float(
-        np.quantile(sampling_times, 0.75)
-        - np.quantile(sampling_times, 0.25)
-    )
-
-    if not bool(torch.isfinite(xi_final).all()):
-        raise FloatingPointError("Posterior sampling produced NaN or Inf draws.")
-    if not bool(torch.isfinite(log_q_final).all()):
-        raise FloatingPointError("Posterior sampling produced non-finite log-q.")
-
-    flow_sanity = None
-    if hasattr(model.flow, "numerical_sanity_check"):
-        with torch.no_grad():
-            sanity_base = model.q0.sample(min(256, int(R_final)))
-            flow_sanity = model.flow.numerical_sanity_check(sanity_base)
-        flow_sanity["n_nonfinite_gradients"] = int(n_nonfinite_gradients)
-        if getattr(model.flow, "coupling_type", None) == "spline":
-            failures = (
-                flow_sanity["n_nonfinite_forward"] > 0
-                or flow_sanity["n_nonfinite_inverse"] > 0
-                or flow_sanity["n_nonfinite_logdet"] > 0
-                or flow_sanity["n_nonfinite_spline_parameters"] > 0
-                or flow_sanity["max_inverse_error"] > float(
-                    spline_inverse_tolerance
-                )
-                or flow_sanity["max_logdet_consistency_error"] > float(
-                    spline_inverse_tolerance
-                )
-                or flow_sanity["min_width"] + 1e-12
-                < float(spline_min_bin_width)
-                or flow_sanity["min_height"] + 1e-12
-                < float(spline_min_bin_height)
-                or flow_sanity["min_derivative"] + 1e-12
-                < float(spline_min_derivative)
-            )
-            if failures:
-                raise RuntimeError(
-                    "Spline numerical sanity check failed: "
-                    f"{flow_sanity}"
-                )
+            xi_final = xi_sample
+            log_q_final = log_q_sample
 
     with torch.no_grad():
-        final_log_likelihood = model.log_likelihood(xi_final)
-        final_log_prior = model.log_prior(xi_final)
-        val_pred = metric.predict_draws(model.decoder, X_eval, xi_final)
-        rat_pred = metric.predict_draws(model.decoder, X_final, xi_final)
-        mcmc_pred = metric.predict_draws(mcmc_decoder, X_final, mcmc_xi)
+        final_ll = model.log_likelihood(xi_final)
+        final_prior = model.log_prior(xi_final)
 
-    recovery, recovery_table = metric.grouped_recovery_metrics(
-        rat_decoder=model.decoder,
-        rat_xi=xi_final,
-        mcmc_decoder=mcmc_decoder,
-        mcmc_xi=mcmc_xi,
+    metrics = bnn_metric.evaluate_bnn(
+        decoder=model.decoder,
+        xi=xi_final,
+        X=X_final,
+        signal=signal_final,
         truth=truth,
+        reference_decoder=reference_decoder,
+        reference_xi=reference_xi,
+        support_threshold=support_threshold,
         min_active_draws=min_active_draws,
     )
-    endpoint_function = metric.function_recovery_metrics(
-        signal=signal_eval,
-        pred_draws=val_pred,
-        prefix="endpoint_val",
-        zero_tol=zero_tol,
-        constant_tol=constant_tol,
-    )
-    rat_function = metric.function_recovery_metrics(
-        signal=signal_final,
-        pred_draws=rat_pred,
-        prefix="rat",
-        zero_tol=zero_tol,
-        constant_tol=constant_tol,
-    )
-    mcmc_function = metric.function_recovery_metrics(
-        signal=signal_final,
-        pred_draws=mcmc_pred,
-        prefix="mcmc",
-        zero_tol=zero_tol,
-        constant_tol=constant_tol,
-    )
+
+    recovery_table = metrics.pop("recovery_table", None)
+    feature_pip = metrics.pop("feature_pip", None)
     summary = {
-        "endpoint": endpoint,
-        "endpoint_epoch": endpoint_epoch,
-        "checkpoint_metric": checkpoint_metric,
-        "checkpoint_epoch": best_epoch,
-        "checkpoint_score": (
-            None if best_state is None else float(best_score)
-        ),
-        "best_epoch": endpoint_epoch,
-        "best_val_signal_r2": endpoint_function["endpoint_val_signal_r2"],
-        "expected_log_likelihood": float(final_log_likelihood.mean()),
-        "expected_log_prior": float(final_log_prior.mean()),
-        "expected_log_q": float(log_q_final.mean()),
-        "kl_q_prior": float((log_q_final - final_log_prior).mean()),
-        "elbo": float(
-            (final_log_likelihood + final_log_prior - log_q_final).mean()
-        ),
+        "flow_type": model.flow_type,
+        "selection_mode": selection_mode,
         "train_time_sec": float(train_time_sec),
         "sec_per_epoch": float(train_time_sec / int(epochs)),
-        "posterior_sampling_time_sec": float(posterior_sampling_time_sec),
-        "posterior_sampling_time_iqr_sec": posterior_sampling_time_iqr_sec,
-        "posterior_sampling_timing_repeats": int(sampling_timing_repeats),
+        "posterior_sampling_time_sec": float(np.median(sampling_times)),
+        "posterior_sampling_time_iqr_sec": float(
+            np.quantile(sampling_times, 0.75)
+            - np.quantile(sampling_times, 0.25)
+        ),
         "trainable_params": trainable_params,
         "flow_trainable_params": flow_trainable_params,
+        "elbo": float((final_ll + final_prior - log_q_final).mean()),
+        "expected_log_likelihood": float(final_ll.mean()),
+        "expected_log_prior": float(final_prior.mean()),
+        "expected_log_q": float(log_q_final.mean()),
         "gpu_peak_memory_bytes": (
             int(torch.cuda.max_memory_allocated(device))
             if device.type == "cuda" else None
         ),
-        "max_inverse_error": (
-            None if flow_sanity is None else flow_sanity["max_inverse_error"]
-        ),
-        "max_logdet_consistency_error": (
-            None if flow_sanity is None
-            else flow_sanity["max_logdet_consistency_error"]
-        ),
-        "n_nonfinite_forward": (
-            None if flow_sanity is None else flow_sanity["n_nonfinite_forward"]
-        ),
-        "n_nonfinite_inverse": (
-            None if flow_sanity is None else flow_sanity["n_nonfinite_inverse"]
-        ),
-        "n_nonfinite_logdet": (
-            None if flow_sanity is None else flow_sanity["n_nonfinite_logdet"]
-        ),
-        "n_nonfinite_spline_parameters": (
-            None if flow_sanity is None
-            else flow_sanity["n_nonfinite_spline_parameters"]
-        ),
-        "n_nonfinite_gradients": int(n_nonfinite_gradients),
-        **endpoint_function,
-        **recovery,
-        **rat_function,
-        **mcmc_function,
+        **metrics,
     }
 
-    rat_groups = metric.group_posterior_summary(
-        model.decoder, xi_final, method="VI", epoch=endpoint_epoch
-    )
-    mcmc_groups = metric.group_posterior_summary(
-        mcmc_decoder, mcmc_xi, method="MCMC"
-    )
-    rat_units = metric.unit_group_summary(
-        model.decoder, xi_final, method="VI", epoch=endpoint_epoch
-    )
-    mcmc_units = metric.unit_group_summary(
-        mcmc_decoder, mcmc_xi, method="MCMC"
-    )
+    flow_sanity = None
+    if hasattr(model.flow, "numerical_sanity_check"):
+        with torch.no_grad():
+            base = model.q0.sample(min(256, int(R_final)))
+            flow_sanity = model.flow.numerical_sanity_check(base)
+        summary.update({
+            f"flow_{key}": value for key, value in flow_sanity.items()
+        })
 
     return {
         "model": model,
         "history": pd.DataFrame(history),
-        "group_history": pd.DataFrame(group_history),
-        "unit_history": pd.DataFrame(unit_history),
         "final": {
             "summary": summary,
             "xi": xi_final.detach(),
-            "rat_prediction_draws": rat_pred,
-            "mcmc_prediction_draws": mcmc_pred,
+            "feature_pip": feature_pip,
+            "recovery_table": recovery_table,
             "flow_sanity": flow_sanity,
-            "recovery_by_target": recovery_table,
-            "group_metrics": pd.concat(
-                [rat_groups, mcmc_groups], ignore_index=True
-            ),
-            "unit_metrics": pd.concat(
-                [rat_units, mcmc_units], ignore_index=True
-            ) if not rat_units.empty else pd.DataFrame(),
         },
         "config": {
             "selection_mode": selection_mode,
-            "input_dim": model.decoder.input_dim,
-            "H": int(model.decoder.H),
+            "input_dim": int(model.decoder.input_dim),
             "hidden_dims": tuple(model.decoder.hidden_dims),
             "out_dim": int(out_dim),
-            "architecture_mode": model.decoder.architecture_mode,
-            "embedding_dim": model.decoder.embedding_dim,
-            "threshold_roles": tuple(model.decoder.threshold_roles),
-            "n_candidate_edges": int(model.decoder.n_candidate_edges),
-            "linear_skip": bool(linear_skip),
-            "flow_type": flow_type,
+            "family": family,
+            "sigma2": float(sigma2),
+            "gate_scale": float(gate_scale),
+            "flow_type": model.flow_type,
             "K_flow": int(K_flow),
+            "flow_hidden_units": int(flow_hidden_units),
+            "flow_hidden_layers": int(flow_hidden_layers),
+            "scale_clip": float(scale_clip),
             "flow_token_dim": int(flow_token_dim),
             "flow_num_heads": int(flow_num_heads),
-            "flow_mask_seed": int(flow_mask_seed),
-            "flow_mask_strategy": getattr(
-                model.flow, "mask_strategy", "identity"
-            ),
-            "conditioner_type": model.conditioner_type,
-            "coupling_type": model.coupling_type,
-            "spline_num_bins": int(spline_num_bins),
-            "spline_tail_bound": float(spline_tail_bound),
-            "spline_min_bin_width": float(spline_min_bin_width),
-            "spline_min_bin_height": float(spline_min_bin_height),
-            "spline_min_derivative": float(spline_min_derivative),
-            "spline_inverse_tolerance": float(spline_inverse_tolerance),
-            "repu_power": repu_power,
-            "gate_type": model.decoder.gate_type,
-            "gate_power": float(gate_power),
-            "gate_tau": gate_tau,
-            "gate_delta": float(gate_delta),
-            "init_sd": model.q0.init_sd,
+            "flow_seed": int(flow_seed),
+            "epochs": int(epochs),
+            "warmup_epochs": int(warmup_epochs),
             "R_train": int(R_train),
             "R_eval": int(R_eval),
             "R_final": int(R_final),
-            "sampling_timing_repeats": int(sampling_timing_repeats),
-            "eval_every": int(eval_every),
-            "epochs": int(epochs),
-            "selection_warmup_epochs": int(selection_warmup_epochs),
-            "init_loc_jitter": float(init_loc_jitter),
-            "endpoint": endpoint,
-            "checkpoint_metric": checkpoint_metric,
+            "lr": float(lr),
             "seed": int(seed),
-            "recovery_eval_max_mcmc_draws": int(
-                recovery_eval_max_mcmc_draws
-            ),
         },
     }
-
-
-def train_bnn(*args, selection_mode="unit_group", **kwargs):
-    """Unified training dispatcher while retaining the legacy edge baseline."""
-
-    if selection_mode == "edge":
-        return train_edge_bnn(*args, **kwargs)
-    return train_grouped_bnn(
-        *args,
-        selection_mode=selection_mode,
-        **kwargs,
-    )
