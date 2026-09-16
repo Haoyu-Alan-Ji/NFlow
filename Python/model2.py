@@ -20,9 +20,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from .autoregressive import StackedIAF
+    from .autoregressive import RoleAwareStackedIAF, StackedIAF
 except ImportError:
-    from autoregressive import StackedIAF
+    from autoregressive import RoleAwareStackedIAF, StackedIAF
 
 
 PARAMETER_TYPE_IDS = {
@@ -1020,7 +1020,30 @@ class GroupedBNNVI(nn.Module):
                 dependency_pairs=self.decoder.flow_dependency_pairs(),
             )
             self.flow_type = "attention"
-        elif self.flow_type == "iaf":
+        elif self.flow_type in {"iaf", "role_aware_iaf"}:
+            role_indices = {
+                "U": tuple(range(0, self.decoder.s_dim)),
+                "V": tuple(range(
+                    self.decoder.s_dim,
+                    self.decoder.s_dim + self.decoder.u_dim,
+                )),
+                "tau": tuple(range(
+                    self.decoder.s_dim + self.decoder.u_dim,
+                    self.decoder.dim,
+                )),
+            }
+            self.flow = RoleAwareStackedIAF(
+                dim=self.decoder.dim,
+                role_indices=role_indices,
+                K=K_flow,
+                hidden_units=flow_hidden_units,
+                num_hidden_layers=flow_hidden_layers,
+                scale_clip=scale_clip,
+                seed=flow_seed,
+                shuffle_within_role=True,
+            )
+            self.flow_type = "iaf"
+        elif self.flow_type == "generic_iaf":
             self.flow = StackedIAF(
                 dim=self.decoder.dim,
                 K=K_flow,
@@ -1030,7 +1053,9 @@ class GroupedBNNVI(nn.Module):
                 seed=flow_seed,
             )
         else:
-            raise ValueError("flow_type must be meanfield, attention, or iaf.")
+            raise ValueError(
+                "flow_type must be meanfield, attention, iaf, or generic_iaf."
+            )
 
     def sample_posterior(self, R):
         z0 = self.q0.sample(R)
