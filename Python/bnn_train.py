@@ -31,14 +31,15 @@ def train_grouped_bnn(
     family="gaussian",
     sigma2=1.0,
     init_sd=0.5,
-    K_flow=4,
-    flow_type="attention",
+    K_flow=6,
+    flow_type="iaf",
     flow_hidden_units=128,
     flow_hidden_layers=2,
     scale_clip=2.0,
-    flow_token_dim=32,
-    flow_num_heads=4,
     flow_seed=None,
+    iaf_ordering_scheme="cyclic3",
+    iaf_shuffle_within_role=True,
+    gate_type="normalized_requ",
     gate_scale=1.0,
     epochs=2000,
     warmup_epochs=500,
@@ -109,9 +110,10 @@ def train_grouped_bnn(
         flow_hidden_units=flow_hidden_units,
         flow_hidden_layers=flow_hidden_layers,
         scale_clip=scale_clip,
-        flow_token_dim=flow_token_dim,
-        flow_num_heads=flow_num_heads,
         flow_seed=flow_seed,
+        iaf_ordering_scheme=iaf_ordering_scheme,
+        iaf_shuffle_within_role=iaf_shuffle_within_role,
+        gate_type=gate_type,
         gate_scale=gate_scale,
     ).to(device)
 
@@ -259,6 +261,25 @@ def train_grouped_bnn(
         **metrics,
     }
 
+    ordering_summary = (
+        model.flow.ordering_summary()
+        if hasattr(model.flow, "ordering_summary") else None
+    )
+    role_position_counts = (
+        model.flow.role_position_counts()
+        if hasattr(model.flow, "role_position_counts") else None
+    )
+    if ordering_summary is not None:
+        role_orders = [
+            "generic" if row["role_order"] is None
+            else "<".join(row["role_order"])
+            for row in ordering_summary
+        ]
+        summary["iaf_ordering_scheme"] = getattr(
+            model.flow, "ordering_scheme", str(iaf_ordering_scheme)
+        )
+        summary["iaf_role_orders"] = " | ".join(role_orders)
+
     flow_sanity = None
     if hasattr(model.flow, "numerical_sanity_check"):
         with torch.no_grad():
@@ -277,6 +298,8 @@ def train_grouped_bnn(
             "feature_pip": feature_pip,
             "recovery_table": recovery_table,
             "flow_sanity": flow_sanity,
+            "ordering_summary": ordering_summary,
+            "role_position_counts": role_position_counts,
         },
         "config": {
             "selection_mode": selection_mode,
@@ -285,15 +308,16 @@ def train_grouped_bnn(
             "out_dim": int(out_dim),
             "family": family,
             "sigma2": float(sigma2),
+            "gate_type": str(gate_type),
             "gate_scale": float(gate_scale),
             "flow_type": model.flow_type,
             "K_flow": int(K_flow),
             "flow_hidden_units": int(flow_hidden_units),
             "flow_hidden_layers": int(flow_hidden_layers),
             "scale_clip": float(scale_clip),
-            "flow_token_dim": int(flow_token_dim),
-            "flow_num_heads": int(flow_num_heads),
             "flow_seed": int(flow_seed),
+            "iaf_ordering_scheme": str(iaf_ordering_scheme),
+            "iaf_shuffle_within_role": bool(iaf_shuffle_within_role),
             "epochs": int(epochs),
             "warmup_epochs": int(warmup_epochs),
             "R_train": int(R_train),

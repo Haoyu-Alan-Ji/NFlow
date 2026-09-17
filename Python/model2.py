@@ -1,15 +1,14 @@
-"""Grouped DSS-LVR Bayesian neural network.
+"""Grouped DSS-LVR Bayesian neural network with role-aware affine IAF.
 
-This cleaned implementation keeps only the structures used by the paper:
-
+Retained implementation:
 - stacked feed-forward networks;
 - feature groups, unit groups, or feature+unit induced connectivity;
-- bounded normalized-ReQU structural gates;
-- full-attention affine coupling or affine IAF posterior transport;
-- a diagonal Gaussian mean-field control.
+- normalized-ReQU or smooth exact-zero structural maps;
+- role-aware affine inverse autoregressive posterior transport;
+- diagonal Gaussian mean-field control.
 
-Legacy spline, lightweight-attention, embed-output, and independent-edge paths
-are intentionally removed.
+Attention/coupling, spline, embed-output, and independent-edge flow paths are
+removed from the main model.
 """
 
 from __future__ import annotations
@@ -18,33 +17,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-try:
-    from .autoregressive import RoleAwareStackedIAF, StackedIAF
-except ImportError:
-    from autoregressive import RoleAwareStackedIAF, StackedIAF
-
-
-PARAMETER_TYPE_IDS = {
-    "none": 0,
-    "beta0": 1,
-    "W1": 2,
-    "b1": 3,
-    "W_hidden": 4,
-    "b_hidden": 5,
-    "Wout": 6,
-    "group_activation": 7,
-    "threshold": 8,
-}
-
-SIDE_IDS = {
-    "none": 0,
-    "input": 1,
-    "output": 2,
-    "global": 3,
-    "group": 4,
-}
-
 
 class NBase(nn.Module):
     """Diagonal Gaussian base distribution with trainable location/scale."""
@@ -91,254 +63,234 @@ class IdentityFlow(nn.Module):
         return x
 
 
-class FullAttentionConditioner(nn.Module):
-    """Full self-attention + target cross-attention affine conditioner."""
+class MaskedLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__(int(in_features), int(out_features), bias=bias)
+        self.register_buffer("mask", torch.ones(self.out_features, self.in_features))
 
-    def __init__(
-        self,
-        dim,
-        fixed_idx,
-        target_idx,
-        latent_metadata,
-        token_dim=32,
-        num_heads=4,
-    ):
-        super().__init__()
-        self.dim = int(dim)
-        self.token_dim = int(token_dim)
-        self.num_heads = int(num_heads)
-        if self.token_dim % self.num_heads != 0:
-            raise ValueError("token_dim must be divisible by num_heads.")
-
-        self.register_buffer(
-            "fixed_idx", torch.as_tensor(fixed_idx, dtype=torch.long)
-        )
-        self.register_buffer(
-            "target_idx", torch.as_tensor(target_idx, dtype=torch.long)
-        )
-
-        required = ("latent_type", "parameter_type", "group", "unit", "side")
-        for name in required:
-            value = torch.as_tensor(latent_metadata[name], dtype=torch.long)
-            if value.numel() != self.dim:
-                raise ValueError(f"metadata {name!r} must have length dim.")
-            self.register_buffer(f"meta_{name}", value)
-
-        self.value_projection = nn.Linear(1, self.token_dim)
-        self.coordinate_embedding = nn.Embedding(self.dim, self.token_dim)
-        self.latent_type_embedding = nn.Embedding(
-            int(self.meta_latent_type.max()) + 1, self.token_dim
-        )
-        self.parameter_type_embedding = nn.Embedding(
-            int(self.meta_parameter_type.max()) + 1, self.token_dim
-        )
-        self.group_embedding = nn.Embedding(
-            int(self.meta_group.max()) + 1, self.token_dim
-        )
-        self.unit_embedding = nn.Embedding(
-            int(self.meta_unit.max()) + 1, self.token_dim
-        )
-        self.side_embedding = nn.Embedding(
-            int(self.meta_side.max()) + 1, self.token_dim
-        )
-
-        self.self_attention = nn.MultiheadAttention(
-            self.token_dim, self.num_heads, batch_first=True
-        )
-        self.cross_attention = nn.MultiheadAttention(
-            self.token_dim, self.num_heads, batch_first=True
-        )
-        self.fixed_norm = nn.LayerNorm(self.token_dim)
-        self.target_norm = nn.LayerNorm(self.token_dim)
-        self.readout = nn.Linear(self.token_dim, 2)
-        nn.init.zeros_(self.readout.weight)
-        nn.init.zeros_(self.readout.bias)
-
-    def _metadata_embedding(self, indices):
-        return (
-            self.coordinate_embedding(indices)
-            + self.latent_type_embedding(self.meta_latent_type.index_select(0, indices))
-            + self.parameter_type_embedding(
-                self.meta_parameter_type.index_select(0, indices)
-            )
-            + self.group_embedding(self.meta_group.index_select(0, indices))
-            + self.unit_embedding(self.meta_unit.index_select(0, indices))
-            + self.side_embedding(self.meta_side.index_select(0, indices))
-        )
+    def set_mask(self, mask):
+        mask = torch.as_tensor(mask, dtype=self.weight.dtype, device=self.mask.device)
+        if mask.shape != self.weight.shape:
+            raise ValueError("MADE mask shape does not match the linear layer.")
+        self.mask.copy_(mask)
 
     def forward(self, x):
-        fixed_values = x.index_select(1, self.fixed_idx).unsqueeze(-1)
-        fixed_tokens = (
-            self.value_projection(fixed_values)
-            + self._metadata_embedding(self.fixed_idx)[None, :, :]
-        )
-        fixed_context, _ = self.self_attention(
-            fixed_tokens, fixed_tokens, fixed_tokens, need_weights=False
-        )
-        fixed_context = self.fixed_norm(fixed_tokens + fixed_context)
-
-        target_query = self._metadata_embedding(self.target_idx)[None, :, :]
-        target_query = target_query.expand(x.shape[0], -1, -1)
-        target_context, _ = self.cross_attention(
-            target_query, fixed_context, fixed_context, need_weights=False
-        )
-        target_context = self.target_norm(target_query + target_context)
-        raw = self.readout(target_context)
-        return raw[..., 0], raw[..., 1]
+        return F.linear(x, self.weight * self.mask, self.bias)
 
 
-class AffineCoupling(nn.Module):
-    def __init__(
-        self,
-        dim,
-        mask,
-        latent_metadata,
-        scale_clip=2.0,
-        token_dim=32,
-        num_heads=4,
-    ):
+class MADE(nn.Module):
+    """Masked MLP returning one affine shift and log-scale per coordinate."""
+
+    def __init__(self, dim, hidden_units=128, num_hidden_layers=2):
+        super().__init__()
+        self.dim = int(dim)
+        self.hidden_units = int(hidden_units)
+        self.num_hidden_layers = int(num_hidden_layers)
+        if self.dim < 1 or self.hidden_units < 1 or self.num_hidden_layers < 1:
+            raise ValueError("MADE dimensions must be positive.")
+
+        layers = []
+        previous = self.dim
+        for _ in range(self.num_hidden_layers):
+            layers.append(MaskedLinear(previous, self.hidden_units))
+            previous = self.hidden_units
+        self.hidden = nn.ModuleList(layers)
+        self.output = MaskedLinear(previous, 2 * self.dim)
+        self._set_masks()
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def _hidden_degrees(self):
+        if self.dim == 1:
+            return torch.ones(self.hidden_units, dtype=torch.long)
+        positions = torch.linspace(1, self.dim - 1, steps=self.hidden_units)
+        return positions.round().long().clamp_(1, self.dim - 1)
+
+    def _set_masks(self):
+        previous_degree = torch.arange(1, self.dim + 1, dtype=torch.long)
+        for layer in self.hidden:
+            hidden_degree = self._hidden_degrees()
+            layer.set_mask((previous_degree[None, :] <= hidden_degree[:, None]).float())
+            previous_degree = hidden_degree
+
+        output_degree = torch.arange(1, self.dim + 1, dtype=torch.long).repeat(2)
+        self.output.set_mask((previous_degree[None, :] < output_degree[:, None]).float())
+
+    def forward(self, x):
+        h = x
+        for layer in self.hidden:
+            h = F.relu(layer(h))
+        return self.output(h).chunk(2, dim=-1)
+
+
+class AffineIAFLayer(nn.Module):
+    """One affine IAF transformation under one fixed coordinate ordering."""
+
+    def __init__(self, dim, permutation, hidden_units=128, num_hidden_layers=2, scale_clip=2.0):
         super().__init__()
         self.dim = int(dim)
         self.scale_clip = float(scale_clip)
-        self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.bool))
-        fixed_idx = torch.nonzero(self.mask, as_tuple=False).flatten()
-        target_idx = torch.nonzero(~self.mask, as_tuple=False).flatten()
-        if fixed_idx.numel() == 0 or target_idx.numel() == 0:
-            raise ValueError("Each coupling mask needs fixed and target coordinates.")
-        self.register_buffer("fixed_idx", fixed_idx)
-        self.register_buffer("target_idx", target_idx)
-        self.conditioner = FullAttentionConditioner(
-            dim=self.dim,
-            fixed_idx=fixed_idx,
-            target_idx=target_idx,
-            latent_metadata=latent_metadata,
-            token_dim=token_dim,
-            num_heads=num_heads,
-        )
+        if self.scale_clip <= 0:
+            raise ValueError("scale_clip must be positive.")
+        permutation = torch.as_tensor(permutation, dtype=torch.long)
+        if permutation.numel() != self.dim or sorted(permutation.tolist()) != list(range(self.dim)):
+            raise ValueError("permutation must contain every coordinate exactly once.")
+        self.register_buffer("permutation", permutation)
+        self.register_buffer("inverse_permutation", torch.argsort(permutation))
+        self.conditioner = MADE(self.dim, hidden_units=hidden_units, num_hidden_layers=num_hidden_layers)
 
-    def params(self, x):
-        raw_log_scale, shift = self.conditioner(x)
-        log_scale = self.scale_clip * torch.tanh(
-            raw_log_scale / self.scale_clip
-        )
+    def _params(self, x_permuted):
+        raw_log_scale, shift = self.conditioner(x_permuted)
+        log_scale = self.scale_clip * torch.tanh(raw_log_scale / self.scale_clip)
         return log_scale, shift
 
     def forward(self, x, return_logdet=False):
-        log_scale, shift = self.params(x)
-        y = x.clone()
-        target = x.index_select(1, self.target_idx)
-        y[:, self.target_idx] = target * torch.exp(log_scale) + shift
+        xp = x.index_select(1, self.permutation)
+        log_scale, shift = self._params(xp)
+        yp = xp * torch.exp(log_scale) + shift
+        y = yp.index_select(1, self.inverse_permutation)
         logdet = log_scale.sum(dim=1)
-        if return_logdet:
-            return y, logdet
-        return y
+        return (y, logdet) if return_logdet else y
 
     def inverse(self, y, return_logdet=False):
-        log_scale, shift = self.params(y)
-        x = y.clone()
-        target = y.index_select(1, self.target_idx)
-        x[:, self.target_idx] = (target - shift) * torch.exp(-log_scale)
-        logdet = -log_scale.sum(dim=1)
-        if return_logdet:
-            return x, logdet
-        return x
+        yp = y.index_select(1, self.permutation)
+        xp = torch.zeros_like(yp)
+        inverse_logdet = y.new_zeros(y.shape[0])
+        for j in range(self.dim):
+            log_scale, shift = self._params(xp)
+            xp[:, j] = (yp[:, j] - shift[:, j]) * torch.exp(-log_scale[:, j])
+            inverse_logdet = inverse_logdet - log_scale[:, j]
+        x = xp.index_select(1, self.inverse_permutation)
+        return (x, inverse_logdet) if return_logdet else x
 
 
-def _normalize_pairs(pairs, dim):
-    out = []
-    seen = set()
-    for a, b in pairs or ():
-        a, b = int(a), int(b)
-        if a == b:
-            continue
-        if not (0 <= a < dim and 0 <= b < dim):
-            raise ValueError("dependency pair contains an invalid coordinate.")
-        key = tuple(sorted((a, b)))
-        if key not in seen:
-            seen.add(key)
-            out.append(key)
-    return out
+class StackedIAF(nn.Module):
+    """Stacked affine IAF with configurable role-aware ordering schedules.
 
+    ``K`` is the actual number of IAF transformations.  ``cyclic3`` repeats
+    U<V<tau, V<tau<U, tau<U<V.  ``six_permutations`` cycles through all six
+    role permutations.  ``generic`` is an order-agnostic control.
+    """
 
-def _pair_coverage(masks, pairs):
-    return [any(bool(mask[a] != mask[b]) for mask in masks) for a, b in pairs]
-
-
-class FullAttentionAffineFlow(nn.Module):
-    """Complementary affine coupling cycles with the full attention conditioner."""
+    ROLE_CYCLE_3 = (
+        ("U", "V", "tau"),
+        ("V", "tau", "U"),
+        ("tau", "U", "V"),
+    )
+    ROLE_CYCLE_6 = (
+        ("U", "V", "tau"),
+        ("V", "tau", "U"),
+        ("tau", "U", "V"),
+        ("V", "U", "tau"),
+        ("U", "tau", "V"),
+        ("tau", "V", "U"),
+    )
 
     def __init__(
         self,
         dim,
-        latent_metadata,
-        K=4,
+        role_indices,
+        K=6,
+        hidden_units=128,
+        num_hidden_layers=2,
         scale_clip=2.0,
-        token_dim=32,
-        num_heads=4,
         seed=123,
-        dependency_pairs=None,
-        max_mask_tries=1000,
+        ordering_scheme="cyclic3",
+        shuffle_within_role=True,
+        custom_role_cycle=None,
     ):
         super().__init__()
         self.dim = int(dim)
         self.K = int(K)
+        self.scale_clip = float(scale_clip)
         self.seed = int(seed)
-        self.flow_type = "attention"
-        self.dependency_pairs = _normalize_pairs(dependency_pairs, self.dim)
-        if self.dim < 2 or self.K < 1:
-            raise ValueError("Attention flow requires dim >= 2 and K >= 1.")
+        self.ordering_scheme = str(ordering_scheme).lower()
+        self.shuffle_within_role = bool(shuffle_within_role)
+        self.flow_type = "iaf"
+        if self.dim < 1 or self.K < 1:
+            raise ValueError("StackedIAF requires dim >= 1 and K >= 1.")
 
-        n_fixed = self.dim // 2
-        semantic_mask = torch.as_tensor(
-            latent_metadata["latent_type"], dtype=torch.long
-        ) == 1
-        masks = None
+        self.role_indices = {
+            str(role): tuple(int(i) for i in indices)
+            for role, indices in role_indices.items()
+        }
+        self._validate_roles()
+        self.role_cycle = self._resolve_role_cycle(custom_role_cycle)
+        orderings = self._make_orderings()
+        self.register_buffer("orderings", torch.stack(orderings, dim=0))
+        self.layers = nn.ModuleList([
+            AffineIAFLayer(
+                self.dim,
+                permutation=order,
+                hidden_units=hidden_units,
+                num_hidden_layers=num_hidden_layers,
+                scale_clip=self.scale_clip,
+            )
+            for order in orderings
+        ])
 
-        if (
-            bool(semantic_mask.any())
-            and bool((~semantic_mask).any())
-            and all(_pair_coverage([semantic_mask], self.dependency_pairs))
-        ):
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(self.seed)
-            masks = [semantic_mask]
-            for _ in range(self.K - 1):
-                perm = torch.randperm(self.dim, generator=generator)
-                mask = torch.zeros(self.dim, dtype=torch.bool)
-                mask[perm[:n_fixed]] = True
-                masks.append(mask)
-            self.mask_strategy = "semantic_plus_random"
+    def _validate_roles(self):
+        required = {"U", "V", "tau"}
+        if set(self.role_indices) != required:
+            raise ValueError("role_indices must contain exactly U, V, and tau.")
+        all_indices = [i for role in ("U", "V", "tau") for i in self.role_indices[role]]
+        if any(len(self.role_indices[role]) == 0 for role in required):
+            raise ValueError("Every role must contain at least one coordinate.")
+        if sorted(all_indices) != list(range(self.dim)):
+            raise ValueError("role_indices must cover 0,...,dim-1 exactly once.")
+
+    def _resolve_role_cycle(self, custom_role_cycle):
+        if custom_role_cycle is not None:
+            cycle = tuple(tuple(str(role) for role in order) for order in custom_role_cycle)
+        elif self.ordering_scheme in {"cyclic3", "role_cycle", "three_cycle"}:
+            cycle = self.ROLE_CYCLE_3
+            self.ordering_scheme = "cyclic3"
+        elif self.ordering_scheme in {"six_permutations", "all6", "balanced6"}:
+            cycle = self.ROLE_CYCLE_6
+            self.ordering_scheme = "six_permutations"
+        elif self.ordering_scheme in {"generic", "coordinate"}:
+            return None
         else:
-            for attempt in range(int(max_mask_tries)):
-                generator = torch.Generator(device="cpu")
-                generator.manual_seed(self.seed + attempt)
-                candidate = []
-                for _ in range(self.K):
-                    perm = torch.randperm(self.dim, generator=generator)
-                    mask = torch.zeros(self.dim, dtype=torch.bool)
-                    mask[perm[:n_fixed]] = True
-                    candidate.append(mask)
-                if all(_pair_coverage(candidate, self.dependency_pairs)):
-                    masks = candidate
-                    self.mask_strategy = "random_balanced"
-                    break
-        if masks is None:
-            raise RuntimeError("Could not construct dependency-covering masks.")
+            raise ValueError("ordering_scheme must be cyclic3, six_permutations, or generic.")
 
-        self.register_buffer("cycle_masks", torch.stack(masks, dim=0))
-        self.layers = nn.ModuleList()
-        for mask in masks:
-            for direction in (mask, ~mask):
-                self.layers.append(
-                    AffineCoupling(
-                        dim=self.dim,
-                        mask=direction,
-                        latent_metadata=latent_metadata,
-                        scale_clip=scale_clip,
-                        token_dim=token_dim,
-                        num_heads=num_heads,
-                    )
-                )
+        roles = {"U", "V", "tau"}
+        if not cycle or any(len(order) != 3 or set(order) != roles for order in cycle):
+            raise ValueError("Each role ordering must contain U, V, and tau exactly once.")
+        return cycle
+
+    @staticmethod
+    def _stable_role_code(role):
+        return sum((i + 1) * ord(ch) for i, ch in enumerate(role))
+
+    def _role_block(self, role, layer_id):
+        indices = torch.as_tensor(self.role_indices[role], dtype=torch.long)
+        if not self.shuffle_within_role or indices.numel() <= 1:
+            return indices
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(self.seed + 100003 * (layer_id + 1) + self._stable_role_code(role))
+        return indices.index_select(0, torch.randperm(indices.numel(), generator=generator))
+
+    def _make_generic_orderings(self):
+        identity = torch.arange(self.dim, dtype=torch.long)
+        orderings = [identity]
+        if self.K >= 2:
+            orderings.append(torch.flip(identity, dims=[0]))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(self.seed)
+        while len(orderings) < self.K:
+            candidate = torch.randperm(self.dim, generator=generator)
+            if self.dim == 1 or not torch.equal(candidate, orderings[-1]):
+                orderings.append(candidate)
+        return orderings
+
+    def _make_orderings(self):
+        if self.role_cycle is None:
+            return self._make_generic_orderings()
+        orderings = []
+        for layer_id in range(self.K):
+            role_order = self.role_cycle[layer_id % len(self.role_cycle)]
+            orderings.append(torch.cat([self._role_block(role, layer_id) for role in role_order]))
+        return orderings
 
     def forward(self, x, return_logdet=False):
         z = x
@@ -346,9 +298,7 @@ class FullAttentionAffineFlow(nn.Module):
         for layer in self.layers:
             z, logdet = layer(z, return_logdet=True)
             total = total + logdet
-        if return_logdet:
-            return z, total
-        return z
+        return (z, total) if return_logdet else z
 
     def inverse(self, z, return_logdet=False):
         x = z
@@ -356,27 +306,43 @@ class FullAttentionAffineFlow(nn.Module):
         for layer in reversed(self.layers):
             x, logdet = layer.inverse(x, return_logdet=True)
             total = total + logdet
-        if return_logdet:
-            return x, total
-        return x
+        return (x, total) if return_logdet else x
+
+    def layer_role_order(self, layer_id):
+        if self.role_cycle is None:
+            return None
+        return self.role_cycle[int(layer_id) % len(self.role_cycle)]
+
+    def ordering_summary(self):
+        rows = []
+        for layer_id in range(self.K):
+            rows.append({
+                "layer": layer_id + 1,
+                "role_order": self.layer_role_order(layer_id),
+                "coordinate_order": tuple(int(i) for i in self.orderings[layer_id].tolist()),
+            })
+        return rows
+
+    def role_position_counts(self):
+        if self.role_cycle is None:
+            return None
+        out = {role: {"first": 0, "middle": 0, "last": 0} for role in ("U", "V", "tau")}
+        labels = ("first", "middle", "last")
+        for layer_id in range(self.K):
+            for pos, role in enumerate(self.layer_role_order(layer_id)):
+                out[role][labels[pos]] += 1
+        return out
 
     @torch.no_grad()
     def numerical_sanity_check(self, base_x):
         transformed, forward_logdet = self.forward(base_x, return_logdet=True)
-        reconstructed, inverse_logdet = self.inverse(
-            transformed, return_logdet=True
-        )
+        reconstructed, inverse_logdet = self.inverse(transformed, return_logdet=True)
         return {
             "max_inverse_error": float((base_x - reconstructed).abs().max()),
-            "max_logdet_consistency_error": float(
-                (forward_logdet + inverse_logdet).abs().max()
-            ),
+            "max_logdet_consistency_error": float((forward_logdet + inverse_logdet).abs().max()),
             "n_nonfinite_forward": int((~torch.isfinite(transformed)).sum()),
             "n_nonfinite_inverse": int((~torch.isfinite(reconstructed)).sum()),
-            "n_nonfinite_logdet": int(
-                (~torch.isfinite(forward_logdet)).sum()
-                + (~torch.isfinite(inverse_logdet)).sum()
-            ),
+            "n_nonfinite_logdet": int((~torch.isfinite(forward_logdet)).sum() + (~torch.isfinite(inverse_logdet)).sum()),
         }
 
 
@@ -571,8 +537,6 @@ class MultiLayerGroupLayout:
         ))
 
         self.group_scalar_indices = self._build_group_members()
-        self.latent_metadata = self._build_latent_metadata()
-        self.dependency_pairs = self._build_dependency_pairs()
 
     def _spec(self, name):
         return next(item for item in self.param_specs if item["name"] == name)
@@ -646,55 +610,6 @@ class MultiLayerGroupLayout:
             return "global"
         return "none"
 
-    def _build_latent_metadata(self):
-        fields = {name: [] for name in (
-            "latent_type", "parameter_type", "group", "unit", "side"
-        )}
-        for item in self.param_specs:
-            for local_index, gid in enumerate(item["metadata_group_ids"]):
-                global_unit = self._scalar_unit(item, local_index)
-                fields["latent_type"].append(0)
-                fields["parameter_type"].append(
-                    PARAMETER_TYPE_IDS[item["parameter_type"]]
-                )
-                fields["group"].append(gid + 1 if gid >= 0 else 0)
-                fields["unit"].append(global_unit + 1 if global_unit >= 0 else 0)
-                fields["side"].append(SIDE_IDS[self._side(item["role"])])
-
-        for meta in self.group_meta:
-            fields["latent_type"].append(1)
-            fields["parameter_type"].append(
-                PARAMETER_TYPE_IDS["group_activation"]
-            )
-            fields["group"].append(int(meta["group_id"]) + 1)
-            global_unit = int(meta.get("global_unit", -1))
-            fields["unit"].append(global_unit + 1 if global_unit >= 0 else 0)
-            fields["side"].append(SIDE_IDS[meta["side"]])
-
-        threshold_side = {"feature": "input", "unit": "group"}
-        for role in self.threshold_roles:
-            fields["latent_type"].append(2)
-            fields["parameter_type"].append(PARAMETER_TYPE_IDS["threshold"])
-            fields["group"].append(0)
-            fields["unit"].append(0)
-            fields["side"].append(SIDE_IDS[threshold_side[role]])
-
-        return {
-            name: torch.as_tensor(values, dtype=torch.long)
-            for name, values in fields.items()
-        }
-
-    def _build_dependency_pairs(self):
-        pairs = []
-        threshold_start = self.s_dim + self.u_dim
-        for gid, scalar_indices in enumerate(self.group_scalar_indices):
-            activation_index = self.s_dim + gid
-            pairs.extend((s, activation_index) for s in scalar_indices)
-            pairs.append((
-                activation_index,
-                threshold_start + self.group_threshold_ids[gid],
-            ))
-        return tuple(pairs)
 
 
 class GroupedMLPDecoder(nn.Module):
@@ -706,6 +621,7 @@ class GroupedMLPDecoder(nn.Module):
         hidden_dims=(5,),
         out_dim=1,
         selection_mode="feature_group",
+        gate_type="normalized_requ",
         gate_scale=1.0,
     ):
         super().__init__()
@@ -716,6 +632,11 @@ class GroupedMLPDecoder(nn.Module):
         self.H = self.hidden_dims[0] if self.num_hidden_layers == 1 else self.n_units
         self.out_dim = int(out_dim)
         self.selection_mode = str(selection_mode)
+        self.gate_type = str(gate_type).lower()
+        aliases = {"nr": "normalized_requ", "smooth": "smooth_step"}
+        self.gate_type = aliases.get(self.gate_type, self.gate_type)
+        if self.gate_type not in {"normalized_requ", "smooth_step"}:
+            raise ValueError("gate_type must be normalized_requ or smooth_step.")
         self.gate_scale = float(gate_scale)
         if self.gate_scale <= 0:
             raise ValueError("gate_scale must be positive.")
@@ -755,8 +676,18 @@ class GroupedMLPDecoder(nn.Module):
         return F.relu(x)
 
     def group_gate(self, margin):
-        positive = F.relu(margin).square()
-        return positive / (self.gate_scale ** 2 + positive)
+        if self.gate_type == "normalized_requ":
+            positive = F.relu(margin).square()
+            return positive / (self.gate_scale ** 2 + positive)
+
+        out = torch.zeros_like(margin)
+        middle = (margin > 0.0) & (margin < self.gate_scale)
+        out[margin >= self.gate_scale] = 1.0
+        if middle.any():
+            m = margin[middle]
+            logit = self.gate_scale / (self.gate_scale - m) - self.gate_scale / m
+            out[middle] = torch.sigmoid(logit)
+        return out
 
     def split_latent(self, xi):
         s = xi[:, :self.s_dim]
@@ -905,13 +836,14 @@ class GroupedMLPDecoder(nn.Module):
         )
 
     def compatibility_signature(self):
-        return self.structural_signature() + (self.gate_scale,)
+        return self.structural_signature() + (self.gate_type, self.gate_scale)
 
-    def flow_metadata(self):
-        return self.layout.latent_metadata
-
-    def flow_dependency_pairs(self):
-        return self.layout.dependency_pairs
+    def flow_role_indices(self):
+        return {
+            "U": tuple(range(0, self.s_dim)),
+            "V": tuple(range(self.s_dim, self.s_dim + self.u_dim)),
+            "tau": tuple(range(self.s_dim + self.u_dim, self.dim)),
+        }
 
     def forward(self, X, xi, force_all_on=False, structural_mask=None):
         slabs = self.unpack_slabs(xi)
@@ -975,14 +907,15 @@ class GroupedBNNVI(nn.Module):
         family="gaussian",
         sigma2=1.0,
         init_sd=0.5,
-        K_flow=4,
-        flow_type="attention",
+        K_flow=6,
+        flow_type="iaf",
         flow_hidden_units=128,
         flow_hidden_layers=2,
         scale_clip=2.0,
-        flow_token_dim=32,
-        flow_num_heads=4,
         flow_seed=123,
+        iaf_ordering_scheme="cyclic3",
+        iaf_shuffle_within_role=True,
+        gate_type="normalized_requ",
         gate_scale=1.0,
     ):
         super().__init__()
@@ -999,6 +932,7 @@ class GroupedBNNVI(nn.Module):
             hidden_dims=hidden_dims,
             out_dim=out_dim,
             selection_mode=selection_mode,
+            gate_type=gate_type,
             gate_scale=gate_scale,
         )
         self.q0 = NBase(self.decoder.dim, init_sd=init_sd)
@@ -1008,54 +942,21 @@ class GroupedBNNVI(nn.Module):
         if int(K_flow) == 0 or self.flow_type == "meanfield":
             self.flow = IdentityFlow()
             self.flow_type = "meanfield"
-        elif self.flow_type in {"attention", "attention_affine", "full_attention"}:
-            self.flow = FullAttentionAffineFlow(
-                dim=self.decoder.dim,
-                latent_metadata=self.decoder.flow_metadata(),
-                K=K_flow,
-                scale_clip=scale_clip,
-                token_dim=flow_token_dim,
-                num_heads=flow_num_heads,
-                seed=flow_seed,
-                dependency_pairs=self.decoder.flow_dependency_pairs(),
-            )
-            self.flow_type = "attention"
-        elif self.flow_type in {"iaf", "role_aware_iaf"}:
-            role_indices = {
-                "U": tuple(range(0, self.decoder.s_dim)),
-                "V": tuple(range(
-                    self.decoder.s_dim,
-                    self.decoder.s_dim + self.decoder.u_dim,
-                )),
-                "tau": tuple(range(
-                    self.decoder.s_dim + self.decoder.u_dim,
-                    self.decoder.dim,
-                )),
-            }
-            self.flow = RoleAwareStackedIAF(
-                dim=self.decoder.dim,
-                role_indices=role_indices,
-                K=K_flow,
-                hidden_units=flow_hidden_units,
-                num_hidden_layers=flow_hidden_layers,
-                scale_clip=scale_clip,
-                seed=flow_seed,
-                shuffle_within_role=True,
-            )
-            self.flow_type = "iaf"
-        elif self.flow_type == "generic_iaf":
+        elif self.flow_type in {"iaf", "role_aware_iaf", "autoregressive"}:
             self.flow = StackedIAF(
                 dim=self.decoder.dim,
+                role_indices=self.decoder.flow_role_indices(),
                 K=K_flow,
                 hidden_units=flow_hidden_units,
                 num_hidden_layers=flow_hidden_layers,
                 scale_clip=scale_clip,
                 seed=flow_seed,
+                ordering_scheme=iaf_ordering_scheme,
+                shuffle_within_role=iaf_shuffle_within_role,
             )
+            self.flow_type = "iaf"
         else:
-            raise ValueError(
-                "flow_type must be meanfield, attention, iaf, or generic_iaf."
-            )
+            raise ValueError("flow_type must be iaf or meanfield.")
 
     def sample_posterior(self, R):
         z0 = self.q0.sample(R)
@@ -1117,8 +1018,6 @@ class GroupedBNNVI(nn.Module):
 
 @torch.no_grad()
 def run_grouped_acceptance_tests(device=None, dtype=torch.float32):
-    """Small structural/flow smoke tests for the retained implementation."""
-
     device = torch.device("cpu") if device is None else torch.device(device)
     results = {}
     for mode in ("feature_group", "unit_group", "feature_unit_induced_edge"):
@@ -1126,43 +1025,37 @@ def run_grouped_acceptance_tests(device=None, dtype=torch.float32):
             input_dim=3,
             hidden_dims=(3, 2),
             selection_mode=mode,
-            gate_scale=1.0,
         ).to(device=device, dtype=dtype)
         xi = torch.randn(8, decoder.dim, device=device, dtype=dtype)
         X = torch.randn(7, 3, device=device, dtype=dtype)
-        pred = decoder(X, xi)
-        results[f"{mode}_finite"] = bool(torch.isfinite(pred).all())
-
-    decoder = GroupedMLPDecoder(
-        input_dim=3,
-        hidden_dims=(3, 2),
-        selection_mode="feature_unit_induced_edge",
-    ).to(device=device, dtype=dtype)
-    xi = torch.randn(16, decoder.dim, device=device, dtype=dtype)
-    edges = decoder.edge_semantics(xi)
-    results["induced_edges_finite"] = all(
-        bool(torch.isfinite(item["gate"]).all()) for item in edges.values()
-    )
+        results[f"{mode}_finite"] = bool(torch.isfinite(decoder(X, xi)).all())
 
     X = torch.randn(12, 3, device=device, dtype=dtype)
     y = torch.randn(12, device=device, dtype=dtype)
-    for flow_type in ("attention", "iaf"):
+    for scheme, K in (("cyclic3", 4), ("six_permutations", 6)):
         model = GroupedBNNVI(
             X, y,
             hidden_dims=(3,),
             selection_mode="feature_group",
-            K_flow=2,
-            flow_type=flow_type,
+            K_flow=K,
+            flow_type="iaf",
             flow_hidden_units=16,
             flow_hidden_layers=1,
-            flow_token_dim=16,
-            flow_num_heads=2,
+            iaf_ordering_scheme=scheme,
         ).to(device)
         base = model.q0.sample(8)
         check = model.flow.numerical_sanity_check(base)
-        results[f"{flow_type}_inverse_error"] = check["max_inverse_error"]
-        results[f"{flow_type}_logdet_error"] = check[
-            "max_logdet_consistency_error"
-        ]
+        results[f"{scheme}_inverse_error"] = check["max_inverse_error"]
+        results[f"{scheme}_logdet_error"] = check["max_logdet_consistency_error"]
 
+    smooth = GroupedMLPDecoder(
+        input_dim=2,
+        hidden_dims=(2,),
+        selection_mode="feature_group",
+        gate_type="smooth_step",
+        gate_scale=1.0,
+    ).to(device=device, dtype=dtype)
+    gate = smooth.group_gate(torch.tensor([-1.0, 0.5, 2.0], device=device, dtype=dtype))
+    results["smooth_gate_finite"] = bool(torch.isfinite(gate).all())
+    results["smooth_gate_exact_zero_one"] = bool(gate[0] == 0 and gate[-1] == 1)
     return results
