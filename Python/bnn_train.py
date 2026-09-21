@@ -8,10 +8,12 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import roc_auc_score
 
-from . import bnn_metric
-from .model2 import GroupedBNNVI
+from . import bnn_metric as metric
+from . import model2 as md
 
+DEVICE = None
 
 def train_grouped_bnn(
     X_train,
@@ -54,6 +56,9 @@ def train_grouped_bnn(
     support_threshold=0.5,
     min_active_draws=50,
     seed=123,
+    slab_init="auto",
+    slab_sd_ratio=0.1,
+    slab_bias_sd=0.02,
 ):
     """Train one grouped BNN and compute only final paper-level metrics.
 
@@ -95,7 +100,7 @@ def train_grouped_bnn(
     if (reference_decoder is None) != (reference_xi is None):
         raise ValueError("reference_decoder and reference_xi must be supplied together.")
 
-    model = GroupedBNNVI(
+    model = md.GroupedBNNVI(
         X=X_train,
         y=y_train,
         input_dim=input_dim,
@@ -115,6 +120,9 @@ def train_grouped_bnn(
         iaf_shuffle_within_role=iaf_shuffle_within_role,
         gate_type=gate_type,
         gate_scale=gate_scale,
+        slab_init=slab_init,
+        slab_sd_ratio=slab_sd_ratio,
+        slab_bias_sd=slab_bias_sd,
     ).to(device)
 
     if reference_decoder is not None and (
@@ -179,12 +187,12 @@ def train_grouped_bnn(
             or epoch == int(epochs)
         ):
             model.eval()
-            with torch.no_grad():
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []), torch.no_grad():
                 xi_eval, _ = model.sample_posterior(R_eval)
                 pred_eval = model.decoder(
                     X_eval, xi_eval, force_all_on=warmup
                 )
-            function = bnn_metric.function_metrics(signal_eval, pred_eval)
+            function = metric.function_metrics(signal_eval, pred_eval)
             row = {
                 "epoch": int(epoch),
                 "phase": "repr" if warmup else "select",
@@ -224,7 +232,7 @@ def train_grouped_bnn(
         final_ll = model.log_likelihood(xi_final)
         final_prior = model.log_prior(xi_final)
 
-    metrics = bnn_metric.evaluate_bnn(
+    metrics = metric.evaluate_bnn(
         decoder=model.decoder,
         xi=xi_final,
         X=X_final,
@@ -310,6 +318,9 @@ def train_grouped_bnn(
             "sigma2": float(sigma2),
             "gate_type": str(gate_type),
             "gate_scale": float(gate_scale),
+            "slab_init": model.slab_init,
+            "slab_sd_ratio": model.slab_sd_ratio,
+            "slab_bias_sd": model.slab_bias_sd,
             "flow_type": model.flow_type,
             "K_flow": int(K_flow),
             "flow_hidden_units": int(flow_hidden_units),
@@ -326,4 +337,129 @@ def train_grouped_bnn(
             "lr": float(lr),
             "seed": int(seed),
         },
+    }
+
+
+def train_grouped_bnn_fast(
+    X_train, y_train, X_eval, signal_eval, X_test, signal_test, *, truth,
+    selection_mode="feature_group", hidden_dims=(20,), sigma2=1.0,
+    init_sd=0.5, K_flow=4, flow_type="iaf",
+    flow_hidden_units=128, flow_hidden_layers=2, scale_clip=2.0,
+    flow_seed=123, iaf_ordering_scheme="cyclic3", iaf_shuffle_within_role=True,
+    gate_type="normalized_requ", gate_scale=1.0,
+    epochs=1200, warmup_epochs=300, lr=3e-4,
+    R_train=32, R_eval=128, R_final=500, eval_every=300,
+    init_loc_jitter=0.05, grad_clip=5.0, support_threshold=0.5,
+    seed=123, report_structure=False,
+    slab_init="auto", slab_sd_ratio=0.1, slab_bias_sd=0.02,
+):
+    global DEVICE
+    DEVICE = X_train.device
+
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+
+    model = md.GroupedBNNVI(
+        X=X_train, y=y_train, input_dim=X_train.shape[1],
+        hidden_dims=tuple(hidden_dims), out_dim=1,
+        selection_mode=selection_mode, family="gaussian", sigma2=float(sigma2),
+        init_sd=float(init_sd), K_flow=int(K_flow), flow_type=flow_type,
+        flow_hidden_units=int(flow_hidden_units), flow_hidden_layers=int(flow_hidden_layers),
+        scale_clip=float(scale_clip), flow_seed=int(flow_seed),
+        iaf_ordering_scheme=iaf_ordering_scheme,
+        iaf_shuffle_within_role=bool(iaf_shuffle_within_role),
+        gate_type=gate_type, gate_scale=float(gate_scale),
+        slab_init=slab_init, slab_sd_ratio=slab_sd_ratio,
+        slab_bias_sd=slab_bias_sd,
+    ).to(DEVICE)
+
+    if float(init_loc_jitter) > 0:
+        with torch.no_grad():
+            model.q0.loc.add_(float(init_loc_jitter) * torch.randn_like(model.q0.loc))
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
+    if DEVICE.type == "cuda":
+        torch.cuda.synchronize()
+    started = time.perf_counter()
+
+    for epoch in range(1, int(epochs) + 1):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        warmup = epoch <= int(warmup_epochs)
+
+        if warmup:
+            xi, log_q = model.sample_posterior(int(R_train))
+            elbo = model.log_likelihood(xi, force_all_on=True) + model.log_prior(xi) - log_q
+        else:
+            elbo = model.elbo_draws(int(R_train))["elbo"]
+
+        loss = -elbo.mean()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+        optimizer.step()
+
+        if epoch == 1 or epoch % int(eval_every) == 0 or epoch == int(epochs):
+            model.eval()
+            with torch.random.fork_rng(devices=[DEVICE] if DEVICE.type == "cuda" else []), torch.no_grad():
+                xi_eval, _ = model.sample_posterior(int(R_eval))
+                pred = model.decoder(X_eval, xi_eval, force_all_on=warmup)
+                fm = metric.function_metrics(signal_eval, pred)
+            print(
+                f"epoch={epoch:04d} phase={'repr' if warmup else 'select':6s} "
+                f"valMSE={fm['mse']:.5f} valR2={fm['r2']:.4f}"
+            )
+
+    if DEVICE.type == "cuda":
+        torch.cuda.synchronize()
+    train_time = time.perf_counter() - started
+
+    model.eval()
+    with torch.no_grad():
+        xi_final, _ = model.sample_posterior(int(R_final))
+        pred_test = model.decoder(X_test, xi_final)
+        fm = metric.function_metrics(signal_test, pred_test)
+
+    result = {
+        "mse": float(fm["mse"]),
+        "r2": float(fm["r2"]),
+        "train_time_sec": float(train_time),
+    }
+
+    feature_pip = None
+    if model.decoder.has_feature_gates:
+        with torch.no_grad():
+            feature_pip = model.decoder.feature_semantics(xi_final)["active"].float().mean(0).cpu().numpy()
+        target = np.asarray(truth["feature_true"], dtype=float).reshape(-1) > 0.5
+        selected = feature_pip > float(support_threshold)
+        active = target
+        inactive = ~target
+        brier_a = float(np.mean((1.0 - feature_pip[active]) ** 2))
+        brier_0 = float(np.mean(feature_pip[inactive] ** 2)) if inactive.any() else np.nan
+        result.update({
+            "tpr": float(np.mean(selected[active])),
+            "auroc": float(roc_auc_score(target.astype(int), feature_pip)) if np.unique(target).size == 2 else np.nan,
+            "brier_bal": float(0.5 * (brier_a + brier_0)) if inactive.any() else brier_a,
+            "expected_support": float(feature_pip.sum()),
+            "selected_support": int(selected.sum()),
+            "mean_active_pip": float(feature_pip[active].mean()),
+            "mean_inactive_pip": float(feature_pip[inactive].mean()) if inactive.any() else np.nan,
+        })
+
+    if model.decoder.has_unit_gates:
+        with torch.no_grad():
+            unit_active = model.decoder.unit_semantics(xi_final)["active"].float()
+        result["expected_active_units"] = float(unit_active.sum(dim=1).mean().cpu())
+
+    if report_structure and selection_mode == "feature_unit_induced_edge":
+        result["edge_density"] = float(metric.network_density(model.decoder, xi_final))
+        result["path_density"] = float(metric.active_path_density(model.decoder, xi_final))
+
+    return {
+        "result": result,
+        "model": model,
+        "xi": xi_final.detach(),
+        "feature_pip": feature_pip,
     }

@@ -917,6 +917,9 @@ class GroupedBNNVI(nn.Module):
         iaf_shuffle_within_role=True,
         gate_type="normalized_requ",
         gate_scale=1.0,
+        slab_init="auto",
+        slab_sd_ratio=0.1,
+        slab_bias_sd=0.02,
     ):
         super().__init__()
         self.register_buffer("X", X)
@@ -957,6 +960,41 @@ class GroupedBNNVI(nn.Module):
             self.flow_type = "iaf"
         else:
             raise ValueError("flow_type must be iaf or meanfield.")
+
+        self.initialize_slab_scale(slab_init, slab_sd_ratio, slab_bias_sd)
+
+    @torch.no_grad()
+    def initialize_slab_scale(self, mode="auto", sd_ratio=0.1, bias_sd=0.02):
+        """Set only the initial q0 slab SD; leave the prior and means unchanged.
+
+        auto preserves legacy initialization for a single hidden layer and
+        uses fan_in for deeper networks. Call only before optimization: an
+        already trained flow need not be the identity. init_sd still controls
+        the initial V/tau SD. The base distribution's log-SD floor is respected.
+        """
+        mode = str(mode).lower()
+        if mode not in {"auto", "legacy", "fan_in"}:
+            raise ValueError("slab_init must be auto, legacy, or fan_in.")
+        if not math.isfinite(float(sd_ratio)) or float(sd_ratio) <= 0:
+            raise ValueError("slab_sd_ratio must be finite and positive.")
+        if not math.isfinite(float(bias_sd)) or float(bias_sd) <= 0:
+            raise ValueError("slab_bias_sd must be finite and positive.")
+        self.slab_init = (
+            "legacy" if self.decoder.num_hidden_layers == 1 else "fan_in"
+        ) if mode == "auto" else mode
+        self.slab_sd_ratio = float(sd_ratio)
+        self.slab_bias_sd = float(bias_sd)
+        if self.slab_init == "legacy":
+            return
+        for spec in self.decoder.param_specs:
+            if len(spec["shape"]) == 2:
+                gain2 = 1.0 if spec["role"] == "output_weight" else 2.0
+                sd = self.slab_sd_ratio * math.sqrt(gain2 / spec["shape"][1])
+            else:
+                sd = self.slab_bias_sd
+            self.q0.raw_log_scale[spec["start"]:spec["end"]].fill_(
+                max(-5.0, min(2.0, math.log(sd)))
+            )
 
     def sample_posterior(self, R):
         z0 = self.q0.sample(R)
