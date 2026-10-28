@@ -7,7 +7,6 @@ data2/
 
 # Archives and logs
 *.tgz
-*.tar.gz
 *.out
 *.err
 logs/

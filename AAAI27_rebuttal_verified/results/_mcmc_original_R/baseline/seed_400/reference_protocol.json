@@ -1,0 +1,14 @@
+{
+  "fingerprint": "7c78452d33ac482c20bbc5c9314bc4d64c5db3d2ff177ca96b1d775115be1617",
+  "n_iter": 10000,
+  "burn": 2000,
+  "thin": 1,
+  "smax": 100,
+  "beta_eps": 0.05,
+  "split_seed": 12345,
+  "family": "gaussian",
+  "sampler": "original run(1).R ESS.Gibbs",
+  "initialization": "original: b0=beta_true; W=1; W0=0",
+  "selection": "original: abs(beta)>beta_eps; pip>0.5",
+  "wall_seconds": 122.32367830001749
+}

@@ -1,0 +1,6 @@
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) stop("Usage: Rscript export_boston.R output_folder")
+dir.create(args[1], recursive = TRUE, showWarnings = FALSE)
+data("Boston", package = "MASS")
+write.csv(MASS::Boston, file.path(args[1], "boston.csv"), row.names = FALSE)
+cat("[export] Boston:", nrow(MASS::Boston), "rows; file", file.path(args[1], "boston.csv"), "\n")

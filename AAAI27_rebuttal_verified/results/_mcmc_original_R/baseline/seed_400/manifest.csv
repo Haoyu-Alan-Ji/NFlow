@@ -1,0 +1,2 @@
+data_path,beta_path,out_dir,setting,seed,sigma2
+E:/positron/NFlow/AAAI27_rebuttal_verified/results/_mcmc_original_R/baseline/seed_400/r_input.csv,E:/positron/NFlow/AAAI27_rebuttal_verified/results/_mcmc_original_R/baseline/seed_400/r_beta.csv,E:/positron/NFlow/AAAI27_rebuttal_verified/results/_mcmc_original_R/baseline/seed_400,baseline,400,1.0

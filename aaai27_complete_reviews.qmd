@@ -1,0 +1,273 @@
+---
+title: "AAAI-27"
+subtitle: "Role-Aware Threshold Flow: Flow-Based Variational Inference for Bayesian Variable Selection"
+date: "October 26, 2026"
+lang: en
+format:
+  html:
+    embed-resources: true
+execute:
+  enabled: false
+editor: source
+---
+
+## Review index
+
+| Phase | Reviewer | Rating | Confidence | Review date |
+|:---|:---|:---:|:---:|:---|
+| Phase 1 | [QvNE](#rev-qvne) | **7** | 3 | Aug 31, 2026 |
+| Phase 1 | [wTmC](#rev-wtmc) | **4** | 4 | Aug 31, 2026 |
+| Phase 2 | [UEzF](#rev-uezf) | **7** | 3 | Oct 22, 2026 |
+| Phase 2 | [t9vG](#rev-t9vg) | **5** | 4 | Oct 21, 2026 |
+| Phase 2 | [njUM](#rev-njum) | **2** | 5 | Oct 11, 2026 |
+| AI Review | [AI Reviewer](#rev-ai-reviewer) | — | — | Jul 27, 2026 |
+
+*Five official numerical ratings: 7, 7, 5, 4, 2. The AI Review has no numerical rating. All displayed reviews were modified October 24, 2026 according to the source screenshots.*
+
+## Phase 1 reviews
+
+### QvNE — 7: Good paper, accept {#rev-qvne}
+
+<p class="reviewtitle"><strong>Original title:</strong> A novel flow-based variational inference framework for Bayesian variable selection</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> QvNE &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-08-31 08:20 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=d854sOnO8k">OpenReview revisions</a></div>
+
+#### Paper Summary
+This paper proposes Role-Aware Threshold Flow (RAT-Flow), a flow-based variational inference framework for Bayesian variable selection with discrete spike-and-slab (DSS) priors. In this setting, MCMC can require long burn-in periods, while mean-field variational inference can significantly underestimate posterior uncertainty. The paper first introduces LVR-DSS, a continuous latent-variable representation for DSS priors. RAT-Flow then approximates the joint posterior of these latent variables using role-aware affine coupling transformations. Numerical experiments demonstrate that RAT-Flow closely reproduces the posterior obtained via MCMC with substantially lower computational cost, while capturing joint posterior dependencies much better than mean-field variational inference.
+
+#### Strengths
+- The LVR-DSS representation provides a useful continuous latent-variable representation of DSS priors. This representation allows to transfer posterior approximation from the mixed discrete-continuous parameter space into a latent continuous space, where flow-based variational inference can be applied.
+- Bayesian variable selection using DSS priors present significant computational challenges. The flow-based framework proposed in this paper provides a novel and practically useful approach, with greater computational efficiency than MCMC and more accurate posterior approximation than mean-field variational inference.
+- The experiments in Section 3 provide comprehensive comparisons with MCMC, mean-field variational inference, and alternative flow architectures, and offer strong empirical support for the proposed framework.
+- The overall presentation of the paper is clear. In particular, the formulations in the Section 2 are clearly organized.
+- The method can accommodate both standard sparsity and group sparsity.
+
+#### Weaknesses
+- The notation $\omega_0\sim\pi_{\omega_0}(\omega_0)$ on page 3 uses the same symbol for the random variable and the argument of its density, which can be confusing. Distinguishing the two would improve clarity.
+- The empirical evaluation is restricted to simulated Gaussian linear regression. Although the framework as presented can accommodate group sparsity and more general model settings, these extensions are not empirically evaluated.
+
+#### Justification of Recommendation
+Overall, I find this paper to be a strong and practically useful contribution and recommend acceptance. The proposed LVR-DSS representation and RAT-Flow architecture are well motivated and provide a flexible and efficient approach for Bayesian variable selection with DSS priors. The experiments are comprehensive and show greater computational efficiency than MCMC and more accurate posterior approximation than mean-field variational inference. My main reservations are about presentation details and the restriction of the empirical evaluation to simulated Gaussian linear regression. These issues do not undermine the main contributions of the paper.
+
+#### Specific Points of Feedback for Rebuttal
+1. The notation $\omega_0\sim\pi_{\omega_0}(\omega_0)$ on page 3 uses the same symbol for the random variable and the argument of its density, which can be confusing.
+2. The empirical evaluation is restricted to simulated Gaussian linear regression. Although the framework as presented can accommodate group sparsity and more general model settings, these extensions are not empirically evaluated.
+3. (Minor) "AT-Flow" on page 2 should be "RAT-Flow".
+4. (Minor) "ffine" on page 2 should be "affine".
+5. (Minor) It seems that $S_\tau$ in the paragraph below equation (2) should be $S_\lambda$?
+6. (Minor) "Rolw-Aware-flow learning" on page 4 should be "Role-Aware-flow learning".
+7. (Minor) "at e cost" on page 7 seems to be a typo.
+
+**Rating:** 7: Good paper, accept
+
+**Confidence:** 3: The reviewer is fairly confident that the evaluation is correct
+
+---
+
+### wTmC — 4: Ok but not good enough - rejection {#rev-wtmc}
+
+<p class="reviewtitle"><strong>Original title:</strong> The mean-field baseline is the paper&#x27;s own method with the flow removed</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> wTmC &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-08-31 05:03 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=DPD1dbqGqJ">OpenReview revisions</a></div>
+
+#### Paper Summary
+The paper reparameterizes the discrete spike-and-slab posterior for Bayesian variable selection so a normalizing flow can act on a purely continuous latent space, with the exact zeros recovered by a threshold map. This is LVR-DSS. A flow that partitions those coordinates by role is then built on it and evaluated on simulated Gaussian linear regression against MCMC, mean-field variational Bayes, and two other flow architectures.
+
+#### Strengths
+The central construction is correct. I checked Example 1 by hand: conditional on the global threshold, the indicator activation with a linear slab induces exactly the DSS prior of Eq. (1), atom at zero included.
+
+I liked that the authors say (p. 5), "They differ only in how the latent slab variables, activation variables, and global threshold are partitioned and updated." That is the right control for an architecture claim.
+
+Replication is better than I usually see: 100 datasets per environment with bootstrap intervals throughout. On p. 7 the authors report a metric they lose on and diagnose it correctly.
+
+#### Weaknesses
+The MFVB comparator is not what the abstract names: it promises "traditional mean-field variational Bayes (MFVB) for DSS priors" (p. 1), but what was run is a diagonal Gaussian over the same LVR-DSS coordinates on the same relaxed objective (p. 5, and the released pseudocode). Traditional spike-and-slab VB uses a discrete-continuous family with explicit inclusion probabilities (Carbonetto and Stephens 2012; Titsias and Lázaro-Gredilla 2011), neither cited. I read that column as the no-coupling rung of their own ablation.
+
+The 7.3× looks like an accounting artifact. The supplement is candid that the 2326.1 s in Table 1 is eight chains run sequentially on one core, against RAT-Flow's four (Table 3). But every accuracy number is measured against the single fixed-length run of Section B.5, which mh_chain_summary.csv puts at about 278 s, cheaper than RAT-Flow's 318.1 s. In core-seconds the eight-chain job is only 1.8×. Do the authors agree with this?
+
+The architecture comparison is run in one environment. Table 4 covers all five but its only flow variants are conditioners; affine coupling and the thinner partition appear only in the baseline, and Section C.2, "Structural ablations", is empty. Yet p. 2 says coarser and finer partitions "lead to inferior posterior approximations".
+
+Correlated designs are never simulated. Every environment uses "independent standardized Gaussian predictors" (supplement, Table 1), yet the introduction calls the geometry hard "particularly when predictors are correlated" (p. 1), which is where a role-aware partition is most exposed.
+
+#### Justification of Recommendation
+One reason that made me choose to reject this manuscript is that the comparison the abstract advertises was not run, and Section B.3, "Compared posterior approximations", is empty. The timing is the second reason, and it is arithmetic over their own released numbers. Both are fixable without new methodology, and I would be glad to see this again.
+
+#### Specific Points of Feedback for Rebuttal
+1. It would be nice if the authors can add a spike-and-slab variational baseline with Bernoulli inclusion factors, rather than a diagonal Gaussian in the latent space. This is the item most likely to change my rating; a partial result would help.
+2. On timing: [1] how many chains produced the reference posterior? [2] Could you report core-seconds, one chain against one RAT-Flow fit? [3] Does the 318.1 s include the 4000-draw posterior sampling that Section B.7 excludes?
+3. Could you run the affine-coupling and thinner-partition arms in the p ≫ n and weak-signal environments, and add one correlated design?
+
+**Rating:** 4: Ok but not good enough - rejection
+
+**Confidence:** 4: The reviewer is confident but not absolutely certain that the evaluation is correct
+
+---
+
+## Phase 2 reviews
+
+### UEzF — 7: Good paper, accept {#rev-uezf}
+
+<p class="reviewtitle"><strong>Original title:</strong> Review for: Role-Aware Threshold Flow: Flow-Based Variational Inference for Bayesian Variable Selection</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> UEzF &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-10-22 03:52 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=aR2PvftiZa">OpenReview revisions</a></div>
+
+#### Paper Summary
+Exact Bayesian inference with DSS priors is intractable and requires approximation methods. The paper introduces Role-Aware Threshold Flow (RAT-Flow), a flow-based approach for approximate posterior inference under DSS priors. The paper addresses a clearly defined problem, and the proposed method is generally well explained, with a development that is easy to follow.
+
+The method is evaluated on simulated datasets and compared against an approximate MCMC posterior distribution. The results show that RAT-Flow achieves performance comparable to MCMC while being substantially faster. Compared to mean-field variational inference, RAT-Flow is computationally more expensive but achieves considerably better posterior approximation accuracy.
+
+#### Strengths
+The paper addresses a well-defined and relevant problem of approximate posterior inference for DSS priors, where exact Bayesian inference is computationally intractable.
+
+The proposed method is generally presented clearly, and the methodological development is easy to follow.
+
+The proposed approach captures posterior dependencies that cannot be adequately represented by standard mean-field variational inference, providing a more flexible posterior approximation.
+
+The experimental results demonstrate that RAT-Flow achieves performance comparable to MCMC while being substantially faster. It also considerably improves posterior approximation accuracy compared to mean-field variational inference.
+
+#### Weaknesses
+The experiments rely on similar data-generating processes, making it difficult to assess how well the proposed method generalizes to other settings. Evaluating the method under more diverse data-generating processes or on real-world datasets would strengthen the empirical validation.
+
+While the paper demonstrates substantial improvements in computational time compared to MCMC, memory consumption is not reported. Including peak memory usage alongside runtime comparisons would provide a more complete assessment of the method's computational efficiency, particularly for larger-scale problems.
+
+#### Justification of Recommendation
+The paper addresses a relevant and well-defined problem and proposes a method that is generally clearly presented and easy to follow. The ability to capture structured posterior dependencies, combined with performance comparable to MCMC at substantially lower computational cost, makes the contribution valuable.
+
+The main limitation is the relatively narrow experimental evaluation, as the experiments rely on similar data-generating processes. A more diverse evaluation, potentially including real-world datasets, would provide stronger evidence of the method's generalizability. Additionally, reporting memory consumption would give a more complete picture of its computational efficiency.
+
+Overall, I consider this a good paper with a meaningful methodological contribution and convincing results within the evaluated settings.
+
+#### Specific Points of Feedback for Rebuttal
+Typos / Recommendations:
+
+1. Example 3: It seems that max(·, 0) is missing from the definition of the activation function.
+2. Page 2, Contributions: "AT-Flow" appears to be a typo and should likely be "RAT-Flow."
+3. Page 4: "Rolw-Aware-flow learning" should be corrected to "Role-Aware-flow learning."
+4. Experiments, Posterior Recovery Metrics: Consider introducing the abbreviation "SKL" when first mentioning the symmetric Kullback–Leibler divergence, as the abbreviation is used later without being defined.
+5. Algorithm presentation: Including pseudocode or a step-by-step algorithm describing the proposed method would improve clarity and make it easier for readers to understand how to implement and apply the method.
+6. It would be helpful to include additional intermediate steps in the appendix for the derivation of the negative ELBO and its approximation. This would make the derivation easier to follow and verify.
+
+Questions:
+
+1. In the approximation of the negative ELBO, the likelihood term appears to use $Z^{(r)}$, whereas the prior term uses $T_\theta Z^{(r)}$. Could the authors clarify whether this difference is intentional?
+2. The authors compare RAT-Flow against an approximate MCMC posterior distribution. Since MCMC itself produces an approximation, its convergence is important when using it as a reference. Could the authors clarify how the convergence of the MCMC reference posterior was assessed, given that it is used as the benchmark for evaluating posterior approximation accuracy?
+
+**Rating:** 7: Good paper, accept
+
+**Confidence:** 3: The reviewer is fairly confident that the evaluation is correct
+
+---
+
+### t9vG — 5: Marginally below acceptance threshold {#rev-t9vg}
+
+<p class="reviewtitle"><strong>Original title:</strong> Review of the paper: why is flow needed?</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> t9vG &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-10-21 11:13 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=67WruF01x4">OpenReview revisions</a></div>
+
+#### Paper Summary
+The paper addresses the problem of Bayesian variation selection with discrete spike and slab priors. Their proposed solution involves a latent variable representation of spike and slab priors, and approximating the posterior in that continuous space rather than involving any discrete variables. Then, the paper designs a normalizing flow architecture, specific to the given problem. Experimentally, comparison is made against MCMC, mean field variational inference, as well as some ablation studies on architectures, e.g., affine coupling layers for normalizing flow transformations.
+
+#### Strengths
+- The paper is generally well written and contributions are understandable.
+- Bayesian variable selection is an interesting problem within certain scientific community.
+- Idea of introducing continuous representation for discrete priors and performing Bayesian inference within that representation sounds sensible and reasonable to try.
+
+#### Weaknesses
+I have noted several concerns.
+
+1. The question is why one needs flow based model. For example, if one looks at figure 2, the posteriors seem mostly gaussian and unimodal. Indeed, comparison to mean-field Gaussian is made (not full covariance however), but the paper does not seem to make a strong case why multimodality is needed within this problem.
+2. On design of normalizing flows: what if one stacks more layers? will these role-aware NF still be beneficial? Motivation is convincing but experimental design should support that more.
+3. I hope experimental evidence are more extensive. Figure 2 and 3 should perhaps include other baselines as well rather than MCMC to see the effect of the proposed role-awareness. Generalization of scientific conclusion should be also tested across different dataset and domains, so that practitioner see the impact of the proposed solution.
+
+#### Justification of Recommendation
+I recommend the borderline reject. Methodological contribution is sensible and interesting. But more extensive experimental results will help make the case for the scientific claims made in the paper. This recommendation is based on the decision that testing on real data instead of synthetic would not be possible within the rebuttal period.
+
+#### Specific Points of Feedback for Rebuttal
+Experimental results across more datasets (real data) and domains would help to see the impact of the approach. Also addressing the concerns above would help to evaluate the paper.
+
+**Rating:** 5: Marginally below acceptance threshold
+
+**Confidence:** 4: The reviewer is confident but not absolutely certain that the evaluation is correct
+
+---
+
+### njUM — 2: Strong rejection {#rev-njum}
+
+<p class="reviewtitle"><strong>Original title:</strong> Review</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> njUM &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-10-11 02:10 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=VfQUwQOsTh">OpenReview revisions</a></div>
+
+#### Paper Summary
+The paper proposes RAT-Flow, a normalizing-flow-based variational inference method for Bayesian variable selection under discrete spike-and-slab priors. The main idea is to introduce a continuous latent representation involving local magnitude variables, activation variables, and a global sparsity threshold, and then construct coupling transformations that respect these roles. The numerical results suggest that RAT-Flow approximates MCMC posteriors reasonably well while reducing computational time.
+
+#### Strengths
+The problem is relevant, and the proposed architecture is intuitive. Retaining exact zeros in posterior samples is an attractive feature, particularly for variable selection. The comparisons with mean-field variational inference, generic affine coupling, and finer coupling partitions are useful. The improvements in posterior inclusion probabilities and computational efficiency are encouraging.
+
+#### Weaknesses
+1. The latent-variable representation and role-aware coupling architecture are interesting, but the methodological novelty appears somewhat incremental. Continuous augmentations of discrete selection mechanisms and structured normalizing flows are established ideas. The paper needs to explain more convincingly what is fundamentally gained by this particular construction.
+2. The claimed generality of the latent representation deserves clarification. In particular, the ReLU activation in Example 2 does not generally produce a Laplace slab when combined with a Gaussian magnitude variable. The induced slab distribution depends on the activation magnitude and its conditional distribution. Similarly, the group-LASSO interpretation in Example 3 needs justification.
+3. The smoothed activation is used during optimization, but the exact activation is restored for posterior sampling. It is unclear how the approximation error arising from this procedure is controlled. Some theoretical discussion of convergence as the smoothing parameter decreases would strengthen the paper.
+4. The experiments are restricted to Gaussian regression with simulated data. The claims regarding generality and scalability would be more convincing with correlated predictors, challenging multimodal posteriors, larger dimensions, and at least one real dataset. The reported results also emphasize marginal posterior recovery, whereas the main motivation for the proposed method is capturing joint posterior dependence. A direct comparison of posterior covariance or joint inclusion probabilities would be valuable.
+5. The manuscript needs careful proofreading. There are numerous grammatical errors, inconsistent method names, and notation issues. Some claims regarding superiority over alternative flows are stronger than the numerical differences warrant, particularly given that generic affine coupling performs better on the inactive-coordinate JS divergence.
+
+#### Justification of Recommendation
+The novelty relative to existing latent-variable and normalizing-flow approaches is not sufficiently established, and the empirical evidence is somewhat narrow for the claims being made. The issues concerning the induced prior distributions and smoothing approximation also deserve attention. The paper is also very poorly written.
+
+#### Specific Points of Feedback for Rebuttal
+Please see the weaknesses mentioned above.
+
+**Rating:** 2: Strong rejection
+
+**Confidence:** 5: The reviewer is absolutely certain that the evaluation is correct and very familiar with the relevant literature
+
+---
+
+## AI Review
+
+### AI Reviewer — AI Review {#rev-ai-reviewer}
+
+<p class="reviewtitle"><strong>Original title:</strong> AI Review</p>
+
+<div class="reviewmeta"><strong>Review ID:</strong> AI Reviewer &nbsp; | &nbsp; <strong>Submitted:</strong> 2026-07-27 06:59 &nbsp; | &nbsp; <strong>Modified:</strong> 2026-10-24 07:30 &nbsp; | &nbsp; <a href="https://openreview.net/revisions?id=nglS7aH0Eo">OpenReview revisions</a></div>
+
+**Title:** Role-Aware Threshold Flow: Flow-Based Variational Inference for Bayesian Variable Selection
+
+#### Synopsis of the paper
+This paper addresses approximate Bayesian variable selection under discrete spike-and-slab priors. It introduces a continuous latent construction with local magnitude and activation variables plus a shared sparsity threshold, then fits their posterior using role-specific affine coupling flows. Exact-zero coefficient draws and posterior inclusion probabilities are recovered by thresholding flow samples. Simulations compare the method with mean-field inference, alternative flow partitions, and MCMC.
+
+#### Summary of Review
+RAT-Flow’s role-aware partition is an identifiable architectural contribution for sparse Bayesian inference, and the simulations show a large separation from the reported mean-field approximation. However, Equation (2) is not a general representation of the DSS prior without additional conditions, while finite-smoothing training targets a different posterior from exact-threshold postprocessing. The central claim of improved joint-dependence recovery is evaluated only through marginal metrics. Moreover, Table 1 supports an accuracy–runtime tradeoff over other flows, rather than the claimed general superiority in posterior approximation, and relevant thresholded-sparsity and transdimensional-flow antecedents narrow the novelty claim.
+
+#### Strengths
+- The global-local geometry supplies a principled architectural inductive bias. Equation (4) and Figure 1 assign separate coupling updates to local magnitudes, local activations, and the global threshold, directly reflecting the asymmetry of their statistical roles and making the architectural hypothesis testable.
+- The flow comparison controls several important confounders. Section 3 states that the variational methods share the latent representation, base distribution, conditioner architecture, continuation schedule, optimization budget, and posterior sample size, so Table 1 largely examines coupling partition and computational cost.
+- The evaluation quantifies dataset-level variation rather than relying on one simulation. Table 1 reports bootstrap intervals across 100 generated datasets, which is useful because posterior recovery can vary substantially among sparse-regression instances.
+- The postprocessing interface retains variable-selection outputs. For the indicator and ReLU activations used in the examples, the procedure on page 5 produces exact-zero coefficient draws and posterior inclusion probabilities rather than only continuous shrinkage estimates.
+
+#### Weaknesses
+- Equation (2) is not a general representation of Equation (1) as written. It permits any $A_\tau:\mathbb{R}\to[0,\infty)$ without requiring positive probability of zero or $A_\tau(v)>0$ exactly when $v>\tau$; Examples 1–3 also state $\Pr(\beta_j\neq0)=1-\Phi(\tau)$ although this is conditional when $\tau$ is random, and Example 2’s ReLU product does not induce the stated Laplace slab. The page-4 “change-of-variables” formula is additionally invalid for this many-to-one map, leaving the precise pushforward DSS target insufficiently defined.
+- Finite-smoothing optimization targets a different posterior from final inference. The ELBO in Section 2 uses $\widetilde A_\tau^{(\delta)}$, whereas page 5 maps final samples using the exact $A_\tau$; the paper provides neither an error bound nor sensitivity analysis connecting the finite-$\delta_L$ optimum to the exact DSS posterior. This gap directly affects the claim that RAT-Flow approximates the stated posterior rather than a surrogate model.
+- Joint-posterior recovery is not directly evaluated. Table 1 contains marginal coefficient divergences, coordinatewise PIP RMSE, AUROC, and AUPRC, while Figures 2–3 are also marginal; none measures covariance, joint inclusion events, posterior model probabilities, or multivariate distributional agreement. Consequently, these results do not establish the repeated claim that RAT-Flow captures joint posterior dependencies substantially better.
+- The novelty positioning omits close published antecedents. Fallah and Rozell (2022) obtain exact spike-and-slab variables by thresholding continuous samples, while Davies et al. (2025) develop flow-based variational inference for transdimensional spaces including Bayesian variable selection; neither work appears by author or title in the supplied manuscript. The contribution therefore needs to be distinguished specifically through its shared-threshold hierarchy and role-aware coupling design.
+- The paper’s mechanism attribution is stronger than Table 1 supports. RAT-Flow and Thinner partition both report active-posterior SKL of 0.4, Thinner has slightly lower displayed PIP RMSE, and generic affine coupling has lower inactive-coordinate JS divergence; AUROC and AUPRC differ by at most 0.5 and 1.3 displayed points, respectively, among flows. These results support RAT-Flow’s accuracy–runtime tradeoff, but not the introduction’s statement that alternative flow architectures produce uniformly inferior posterior approximations.
+- The main text neither specifies nor points to the estimators used for its headline divergences. Section 3 defines population SKL and JS divergence, but the compared posteriors combine an atom at zero with a continuous component, for which naive empirical KL is undefined and ordinary density estimation can smooth away the spike; Figure 2 similarly renders the inactive mixed distribution as a conventional density. This blocks assessment of Table 1’s principal posterior-recovery measurements.
+
+#### Suggestions for Improvement
+- Credible-interval coverage, PIP calibration, posterior predictive log score, and selection error under a declared decision rule would connect posterior agreement to the uncertainty-quantification and prediction motivations in Section 1.
+- Strongly correlated or nearly collinear predictors would provide a more discriminating stress test than support ranking in the baseline regime. Such designs create competing sparse models and directly exercise the dependence structure motivating role-aware transport.
+- A compact main-text summary across all five announced regimes would align the empirical narrative with the abstract and conclusion. Detailed results can remain supplementary, but the current main paper provides numerical evidence only for the baseline regime.
+- Moving the unevaluated grouped extension until after the complete basic RAT-Flow algorithm would make the method section more linear. Its present location interrupts the progression from the core latent construction to the inference procedure used in the experiments.
+
+#### Additional Details and Minor Issues
+- Figure 1 and the contribution list order updates as magnitude–activation–threshold, while Equation (4), read right to left, applies activation–magnitude–threshold. Coupling blocks do not generally commute, so the implemented order should be identified.
+- The threshold transformation on page 4 uses $h_V$ where $h_\tau$ appears intended, and the conditioner parameter list repeats $\theta_A$.
+- Figure 3 shows near-perfect agreement for selected coordinates, whereas Table 1 reports aggregate PIP RMSE 0.110; the dataset and coordinate-selection rule should be stated.
+- The conclusion proposes future extension to grouped models although Section 2 already presents a grouped construction; it should distinguish formulation from implementation and evaluation.
+- Frequent errors such as “MFVA,” “AT-Flow,” “joined posterior,” and “golden-standard” warrant a technical copyedit because several occur in method-defining passages.
+
+#### References
+Davies, L., MacKinlay, D., Oliveira, R., & Sisson, S. A. (2025). Variational transdimensional inference. In *Advances in Neural Information Processing Systems* (Vol. 38). ([proceedings.neurips.cc](https://proceedings.neurips.cc/paper_files/paper/2025/hash/2cd2e3213d3a1c942758a75ea3e8e6d7-Abstract-Conference.html))
+
+Fallah, K., & Rozell, C. J. (2022). Variational sparse coding with learned thresholding. In *Proceedings of the 39th International Conference on Machine Learning*, *Proceedings of Machine Learning Research, 162*, 6034–6058. ([proceedings.mlr.press](https://proceedings.mlr.press/v162/fallah22a.html))
+
+---
